@@ -1,0 +1,16 @@
+# Xcode local state and build products
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.xcresult
+*.ipa
+*.dSYM/
+*.dSYM.zip
+# Local verification artifacts
+.test-artifacts/
+.test-artifacts-*.log
+tmp/
