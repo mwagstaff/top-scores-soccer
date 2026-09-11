@@ -4,6 +4,7 @@ import Foundation
 /// timeline; this helper never moves, attracts or acquires the ball ahead of physical contact.
 enum GoalkeeperAI {
     struct Configuration: Equatable, Sendable {
+        var ends = MatchEnds()
         var boxHalfWidth = 20.0
         var boxDepth = 16.5
         var homeDepth = 2.2
@@ -61,13 +62,10 @@ enum GoalkeeperAI {
         case parry(velocity: Vector2, verticalVelocity: Double)
     }
 
-    /// The north-facing blue team defends the south goal, and vice versa.
-    private static func attackDirection(for team: Team) -> Double { team == .blue ? 1 : -1 }
-
     static func isInOwnBox(_ position: Vector2, team: Team,
                            configuration: Configuration = .defaults) -> Bool {
         guard position.x.isFinite, position.y.isFinite else { return false }
-        let depth = Pitch.length / 2 + position.y * attackDirection(for: team)
+        let depth = Pitch.length / 2 + position.y * configuration.ends.attackSign(for: team)
         return abs(position.x) <= configuration.boxHalfWidth && depth >= 0 && depth <= configuration.boxDepth
     }
 
@@ -93,7 +91,7 @@ enum GoalkeeperAI {
 
     static func step(state: inout State, keeper: PlayerState, team: Team, ball: BallState,
                      ownsBall: Bool, dt: Double, handlingAllowed: Bool = true, configuration: Configuration = .defaults) -> Intent {
-        let attack = attackDirection(for: team)
+        let attack = configuration.ends.attackSign(for: team)
         let upfield = Vector2.up * attack
         guard dt.isFinite, dt > 0 else {
             let profile = contactProfile(state: state, configuration: configuration)
@@ -192,8 +190,8 @@ enum GoalkeeperAI {
         let offset = ball.position.x - keeper.position.x
         let side = abs(offset) > 0.05 ? (offset > 0 ? 1.0 : -1.0)
             : abs(ball.velocity.x) > 0.05 ? (ball.velocity.x > 0 ? 1.0 : -1.0)
-            : attackDirection(for: team)
-        let direction = Vector2(x: side * 0.8, y: attackDirection(for: team) * 0.6)
+            : configuration.ends.attackSign(for: team)
+        let direction = Vector2(x: side * 0.8, y: configuration.ends.attackSign(for: team) * 0.6)
         let speed = min(24, max(8, ball.velocity.length * 0.58))
         return .parry(velocity: direction * speed, verticalVelocity: min(3, 0.8 + ball.height * 0.4))
     }

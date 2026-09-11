@@ -4,6 +4,10 @@ import Foundation
 struct FootballSimulation {
     var tuning: GameplayTuning
     private(set) var configuration: FriendlyMatchConfiguration?
+    // Tests can supply a fixed coin toss; live sessions draw a fresh toss for every new match.
+    private let chooseStartingEnds: () -> Bool
+    private var firstHalfBlueAttacksNorth = true
+    private(set) var ends = MatchEnds()
     private var abilityKickSequence = 0
     var movement = Vector2.zero {
         didSet { rememberDeliberateKickAim() }
@@ -19,6 +23,8 @@ struct FootballSimulation {
     }
     var ball = BallState()
     private(set) var phase: SandboxPhase = .playing
+    // Match scores belong to blue/red respectively, irrespective of the physical goal.
+    // Practice mode retains the original north/south goal counters.
     private(set) var northGoals = 0
     private(set) var southGoals = 0
     private(set) var resetGeneration = 0
@@ -39,7 +45,21 @@ struct FootballSimulation {
     private(set) var slideCount = 0
     private(set) var chipCount = 0
     private(set) var headerCount = 0
+    private(set) var crossCount = 0
     private(set) var lastHeaderPlayerID: Int?
+    private struct CrossFlight {
+        let passerID: Int
+        let receiverID: Int
+        let destination: Vector2
+        let launchMovement: Vector2
+        var remaining: Double
+        var manualSteering = false
+    }
+    private var crossFlight: CrossFlight?
+    var isCrossInFlight: Bool {
+        crossFlight != nil && phase == .playing && possessionID == nil
+            && ball.mode == .pass && ballIsStillInPlay()
+    }
     private(set) var queuedPassCount = 0
     private(set) var foulCount = 0
     private(set) var lastFoul: FoulEvent?
@@ -61,12 +81,127 @@ struct FootballSimulation {
         }
         guard let foul, roster.indices.contains(foul.offenderID) else { return nil }
         return mode == .match && PenaltyRules.awardsPenalty(at: foul.position,
-            offender: roster[foul.offenderID].team, awarded: foul.awardedTeam) ? .penalty : .freeKick
+            offender: roster[foul.offenderID].team, awarded: foul.awardedTeam, ends: ends) ? .penalty : .freeKick
     }
     private var penaltyCompletionPending: Bool {
         awardedFoulRestartKind == .penalty || matchRestart?.kind == .penalty || penaltyFlight != nil
     }
     private(set) var matchTimeElapsed = 0.0
+    private(set) var matchHalf = 1
+    private(set) var periodElapsed = 0.0
+    private(set) var stoppageTime = 0.0
+    private(set) var pendingInjuryID: Int?
+    private(set) var substitutionNotice: String?
+    private var substitutionNoticeRemaining = 0.0
+    private(set) var unavailableSquadIDs: Set<String> = []
+    private var injuryRandomState: UInt64 = 0xA17E_932D
+    private var periodHasStarted = false
+    // Possession and danger-area boundaries can flicker during a tackle or rebound.
+    // Require a short, continuous spell of safe live play before whistling an attack dead.
+    private var opportunityGraceRemaining = 0.0
+    var halfDuration: Double { matchDuration / 2 }
+    var periodTimeRemaining: Double {
+        let remaining = halfDuration + stoppageTime - periodElapsed
+        return remaining > 0.0000001 ? remaining : 0
+    }
+    var isInStoppageTime: Bool { periodElapsed >= halfDuration && periodHasStarted }
+    var injuryReplacements: [ClubPlayer] {
+        guard let id = pendingInjuryID else { return [] }
+        return replacements(for: id)
+    }
+
+    /// Either side gets to complete a threatening phase, including its awarded set piece.
+    /// A catch, settled clearance, goal, offside or defensive restart ends that opportunity.
+    var hasGoalScoringOpportunity: Bool {
+        guard mode == .match else { return false }
+        if penaltyCompletionPending { return true }
+        if let foul = pendingFoul ?? (phase == .freeKick(team: .blue) || phase == .freeKick(team: .red) ? lastFoul : nil) {
+            return isAttackingPosition(foul.position, for: foul.awardedTeam)
+        }
+        if let restart = matchRestart {
+            switch restart.kind {
+            case .corner, .penalty: return true
+            case .freeKick, .throwIn: return isAttackingPosition(restart.position, for: restart.team)
+            default: return false
+            }
+        }
+        guard phase == .playing, keeperHandsID == nil, ballIsStillInPlay() else { return false }
+        let attackingTeam = ends.attackingTeam(atNorthGoal: ball.position.y >= 0)
+        let forward = ends.attackSign(for: attackingTeam)
+        // A loose ball or a defender's brief claim beside an attacker is still a chance.
+        // In particular, a saved ball may be moving sideways/backwards and retain the
+        // defender's last touch while the forward is one stride away from a tap-in.
+        if isAttackingPosition(ball.position, for: attackingTeam),
+           ball.height <= HeadingMechanics.maximumHeight,
+           roster.contains(where: {
+               $0.team == attackingTeam && !$0.isGoalkeeper && !$0.isUnavailable
+                   && ($0.state.position - ball.position).length <= max(4, tuning.kickReach)
+           }) { return true }
+        if let owner = possessionID {
+            return !roster[owner].isGoalkeeper && isAttackingPosition(ball.position, for: roster[owner].team)
+        }
+        // A shot can be on its way into the goal before it reaches the danger area.
+        if ball.mode == .shot, abs(ball.velocity.y) > 1 {
+            let goalY = ball.velocity.y > 0 ? Pitch.length / 2 : -Pitch.length / 2
+            let arrival = (goalY - ball.position.y) / ball.velocity.y
+            if arrival > 0, arrival <= 3,
+               abs(ball.position.x + ball.velocity.x * arrival) <= Pitch.goalWidth / 2 + Pitch.ballRadius {
+                return true
+            }
+        }
+        // A defensive deflection does not erase an incoming shot/cross.
+        return isAttackingPosition(ball.position, for: attackingTeam)
+            && (lastTouchTeam == attackingTeam || ball.velocity.y * forward > 1)
+    }
+
+    private var canEndPeriod: Bool {
+        guard !hasGoalScoringOpportunity else { return false }
+        // Decisive stoppages need no grace period; a catch really has ended the attack.
+        return phase != .playing || keeperHandsID != nil || opportunityGraceRemaining <= 0
+    }
+
+    private func isAttackingPosition(_ position: Vector2, for team: Team) -> Bool {
+        let depth = Pitch.length / 2 - position.y * ends.attackSign(for: team)
+        return depth < 25 && abs(position.x) < 30
+    }
+
+    private mutating func accountForStoppage(_ dt: Double) {
+        guard mode == .match, periodHasStarted else { return }
+        // Running match time and time lost advance together, preserving the full live-play
+        // allocation. Help/settings and the replacement picker never enter this clock.
+        periodElapsed += dt
+        stoppageTime += dt
+    }
+
+    mutating func resumeAfterHalfTime() {
+        guard phase == .halfTime else { return }
+        matchHalf = 2
+        ends.blueAttacksNorth.toggle()
+        periodElapsed = 0
+        stoppageTime = 0
+        periodHasStarted = false
+        opportunityGraceRemaining = 0
+        prepareMatchRestart(MatchRestart(kind: .kickoff, team: .red, position: .zero, takerID: nil))
+    }
+
+    private mutating func finishHalf() {
+        if matchHalf == 2 { finishMatch(); return }
+        cancelInput()
+        clearRestartSupport()
+        resetOffsideForRestart()
+        penaltyFlight = nil
+        penaltySecondTouchTakerID = nil
+        keeperHandsID = nil
+        possessionID = nil
+        controlClaim = false
+        activePassTargetID = nil
+        matchRestart = nil
+        freeKickReadyTeam = nil
+        phase = .halfTime
+        ball.velocity = .zero
+        ball.verticalVelocity = 0
+        for id in roster.indices { roster[id].state.velocity = .zero }
+    }
     private(set) var matchRestart: MatchRestart?
     private(set) var lastTouchTeam: Team?
     private(set) var lastDeliberatePlayTeam: Team?
@@ -80,14 +215,14 @@ struct FootballSimulation {
         guard phase == .playing, let keeper = keeperHandsID, possessionID == keeper,
               regroupingKeeperID == keeper, regroupingSaveCount == goalkeeperSaveCount, let outlet = shortOutletID,
               roster.indices.contains(outlet), roster[outlet].team == roster[keeper].team,
-              !roster[outlet].isSentOff, !roster[outlet].isGoalkeeper else { return nil }
+              !roster[outlet].isUnavailable, !roster[outlet].isGoalkeeper else { return nil }
         return outlet
     }
     var goalkeeperHoldingID: Int? { phase == .playing ? keeperHandsID : nil }
     var isHoldingGoalkeeper: Bool { goalkeeperHoldingID == selectedPlayerID && roster[selectedPlayerID].team == .blue }
     var isControllingGoalkeeper: Bool {
         phase == .playing && roster[selectedPlayerID].team == .blue && roster[selectedPlayerID].isGoalkeeper
-            && !roster[selectedPlayerID].isSentOff
+            && !roster[selectedPlayerID].isUnavailable
             && (possessionID == selectedPlayerID || isControllingPassReceiver
                 || (lastKickerID == selectedPlayerID && (curveRemaining > 0 || chipRemaining > 0)))
     }
@@ -135,9 +270,11 @@ struct FootballSimulation {
     private var actionWasTackle = false
     private var actionReceiving = false
     private var actionHeading = false
+    private var actionHeaderOnPress = false
     private struct QueuedHeader {
         let actorID: Int
         let aim: Vector2
+        var goalDirected = false
         var remaining: Double
     }
     private var queuedHeader: QueuedHeader?
@@ -214,7 +351,10 @@ struct FootballSimulation {
     private(set) var aftertouchVector = Vector2.zero
 
     init(tuning: GameplayTuning = .defaults, mode: ExerciseMode = .solo,
-         configuration: FriendlyMatchConfiguration? = nil) {
+         configuration: FriendlyMatchConfiguration? = nil, injurySeed: UInt64 = 0xA17E_932D,
+         chooseStartingEnds: @escaping () -> Bool = { true }) {
+        self.chooseStartingEnds = chooseStartingEnds
+        self.injuryRandomState = injurySeed
         self.tuning = tuning
         self.configuration = configuration?.isValid == true ? configuration : nil
         self.mode = self.configuration == nil ? mode : .match
@@ -239,24 +379,25 @@ struct FootballSimulation {
         if isHoldingGoalkeeper || (isTakingRestart && matchRestart?.kind == .goalKick) {
             return currentDistributionChoice()?.targetID
         }
+        if actionDown, !actionCancelled, actionElapsed >= tuning.holdThreshold, hasControl,
+           let cross = crossingOpportunity(for: actionActorID) { return cross.receiverID }
         if actionDown, !actionCancelled, actionElapsed < tuning.holdThreshold,
            let intent = actionPassIntent { return intent.targetID }
         if let queued = queuedPass, let intent = queued.passIntent { return intent.targetID }
         if let target = activePassTargetID { return target }
         guard hasControl else { return nil }
-        return choosePassTarget(from: selectedPlayerID, aim: intendedKickAim(for: selectedPlayerID),
-                                maximumDistance: isHoldingGoalkeeper ? keeperThrowRange(heldFor: actionElapsed) : nil)
+        return quickPassTarget(from: selectedPlayerID, aim: intendedKickAim(for: selectedPlayerID))
     }
 
     var isControllingPassReceiver: Bool {
         phase == .playing && mode != .solo && receiverControlRemaining > 0
             && ball.mode == .pass && activePassTargetID == selectedPlayerID
-            && !roster[selectedPlayerID].isSentOff
+            && !roster[selectedPlayerID].isUnavailable
     }
 
     var canPrepareReceivingKick: Bool { receivingPlayerID != nil }
     var isPreparingReceivingKick: Bool { actionDown && actionReceiving && !actionCancelled }
-    var isPreparingHeader: Bool { (actionDown && actionHeading && !actionCancelled) || queuedHeader != nil }
+    var isPreparingHeader: Bool { (actionDown && actionHeading && !actionHeaderOnPress && !actionCancelled) || queuedHeader != nil }
     var headingPlayerID: Int? {
         guard phase == .playing, freeKickReadyTeam == nil, keeperHandsID == nil, !hasControl,
               ball.height > tuning.airborneContactHeight, ballIsStillInPlay() else { return nil }
@@ -322,7 +463,7 @@ struct FootballSimulation {
     var hasControl: Bool {
         if isHoldingGoalkeeper { return true }
         if mode != .solo {
-            return phase == .playing && !roster[selectedPlayerID].isSentOff && possessionID == selectedPlayerID
+            return phase == .playing && !roster[selectedPlayerID].isUnavailable && possessionID == selectedPlayerID
                 && ball.height <= tuning.airborneContactHeight
                 && (kickGuards[selectedPlayerID] ?? 0) <= 0
                 && (ball.position - player.position).length <= controlReleaseDistance(for: selectedPlayerID)
@@ -337,22 +478,47 @@ struct FootballSimulation {
         isHoldingGoalkeeper || (hasControl && (ball.position - player.position).length <= tuning.kickReach)
     }
 
+    var canCross: Bool { hasControl && crossingOpportunity(for: selectedPlayerID) != nil }
+
+    private func crossingExclusions(for actor: Int) -> Set<Int> {
+        mode == .match ? OffsideRules.snapshot(actor: actor, ball: ball.position,
+            roster: roster, restart: matchRestart?.kind, ends: ends)?.candidates ?? [] : []
+    }
+
+    private func crossingOpportunity(for actor: Int) -> CrossingMechanics.Opportunity? {
+        guard mode != .solo, phase == .playing, matchRestart == nil, freeKickReadyTeam == nil,
+              keeperHandsID == nil, roster.indices.contains(actor), !roster[actor].isGoalkeeper else { return nil }
+        return CrossingMechanics.opportunity(crosser: roster[actor], roster: roster, tuning: tuning,
+            ends: ends, excludedReceiverIDs: crossingExclusions(for: actor))
+    }
+
     var powerMeterKind: KickPowerKind? {
         guard actionDown, !actionCancelled, !actionWasTackle, !actionHeading else { return nil }
         if isHoldingGoalkeeper { return .keeperDistribution }
         if matchRestart?.kind == .throwIn { return .throwIn }
         if matchRestart?.kind == .goalKick { return .longKick }
         if matchRestart?.kind == .penalty { return .shot }
+        if hasControl, crossingOpportunity(for: actionActorID) != nil { return .cross }
         return assistedShotDirection(from: actionActorID, aim: intendedKickAim(for: actionActorID)) != nil ? .shot : .longKick
     }
     var powerMeterFraction: Double {
         guard let kind = powerMeterKind else { return 0 }
+        if kind == .cross { return CrossingMechanics.meterFraction(heldFor: actionElapsed, tuning: tuning) }
         return kind == .shot ? KickMechanics.shotMeterFraction(heldFor: actionElapsed, tuning: tuning) : charge(for: actionElapsed)
     }
     var powerMeterSweetSpot: ClosedRange<Double>? {
-        powerMeterKind == .shot ? KickMechanics.shotSweetSpot(tuning: tuning) : nil
+        if powerMeterKind == .cross { return CrossingMechanics.sweetSpot(tuning: tuning) }
+        return powerMeterKind == .shot ? KickMechanics.shotSweetSpot(tuning: tuning) : nil
     }
-    var powerMeterOverhitStart: Double? { powerMeterKind == .shot ? KickMechanics.shotOverhitStart(tuning: tuning) : nil }
+    var powerMeterOverhitStart: Double? {
+        if powerMeterKind == .cross { return CrossingMechanics.overhitStart(tuning: tuning) }
+        return powerMeterKind == .shot ? KickMechanics.shotOverhitStart(tuning: tuning) : nil
+    }
+
+    var isOverchargingPower: Bool {
+        if powerMeterKind == .cross { return CrossingMechanics.isOverhit(heldFor: actionElapsed, tuning: tuning) }
+        return isOverchargingShot
+    }
 
     var isOverchargingShot: Bool {
         powerMeterKind == .shot && KickMechanics.isOverhit(heldFor: actionElapsed, tuning: tuning)
@@ -380,11 +546,17 @@ struct FootballSimulation {
     mutating func step(dt: Double) {
         guard dt.isFinite, dt > 0 else { return }
         if case .practiceEnded = phase { return }
-        if phase == .fullTime { return }
-        if case .foulContact = phase { advanceFoulAftermath(dt: dt); return }
-        if case .freeKick(let team) = phase { advanceFreeKickAftermath(for: team, dt: dt); return }
+        if phase == .fullTime || phase == .halfTime || pendingInjuryID != nil { return }
+        substitutionNoticeRemaining = max(0, substitutionNoticeRemaining - dt)
+        if substitutionNoticeRemaining == 0 { substitutionNotice = nil }
+        if case .foulContact = phase { accountForStoppage(dt); advanceFoulAftermath(dt: dt); return }
+        if case .freeKick(let team) = phase { accountForStoppage(dt); advanceFreeKickAftermath(for: team, dt: dt); return }
+        opportunityGraceRemaining = hasGoalScoringOpportunity ? 0.75 : max(0, opportunityGraceRemaining - dt)
+        if mode == .match, periodHasStarted, periodTimeRemaining <= 0.0000001,
+           canEndPeriod { finishHalf(); return }
         if mode != .solo, phase == .playing, !checkPracticeCanContinue() { return }
         guard phase == .playing else {
+            accountForStoppage(dt)
             restartCountdown -= dt
             if restartCountdown <= 0 {
                 if mode == .match, let restart = matchRestart { prepareMatchRestart(restart) }
@@ -395,13 +567,22 @@ struct FootballSimulation {
 
         if mode != .solo {
             let liveMatch = mode == .match && freeKickReadyTeam == nil
-            let completingPenalty = liveMatch && matchTimeRemaining <= 0.0000001 && penaltyCompletionPending
-            let playDT = liveMatch && !completingPenalty ? min(dt, matchTimeRemaining) : dt
+            let extendingAttack = liveMatch && periodTimeRemaining <= 0.0000001
+            let playDT = liveMatch && !extendingAttack ? min(dt, periodTimeRemaining) : dt
+            if liveMatch { periodHasStarted = true }
+            else { accountForStoppage(dt) }
             if playDT > 0 { stepExercise(dt: playDT) }
             if liveMatch {
                 matchTimeElapsed = min(matchDuration, matchTimeElapsed + playDT)
+                periodElapsed += playDT
                 updatePenaltyCompletion()
-                if matchTimeRemaining <= 0.0000001 && !penaltyCompletionPending { finishMatch() }
+                if hasGoalScoringOpportunity { opportunityGraceRemaining = 0.75 }
+                // Complete the foul animation and any injury selection before ending a half.
+                let foulAftermath = pendingFoul != nil || {
+                    if case .freeKick = phase { return true }; return false
+                }()
+                if periodTimeRemaining <= 0.0000001 && canEndPeriod
+                    && !foulAftermath && pendingInjuryID == nil { finishHalf() }
             }
             return
         }
@@ -433,7 +614,7 @@ struct FootballSimulation {
 
     mutating func pressAction(timestamp: Double? = nil) {
         if mode == .match, freeKickReadyTeam != nil, freeKickReadyTeam != .blue { return }
-        guard phase == .playing, !actionDown, !roster[selectedPlayerID].isSentOff,
+        guard phase == .playing, !actionDown, !roster[selectedPlayerID].isUnavailable,
               !roster[selectedPlayerID].isGoalkeeper || isControllingGoalkeeper else { return }
         earlyPassAdjustment = nil
         // Touching ACTION should recognise the same close pickup as the next simulation tick.
@@ -469,7 +650,7 @@ struct FootballSimulation {
         } else {
             actionPassIntent = mode != .solo && (hasControl || receiver != nil)
                 && matchRestart?.kind != .throwIn && matchRestart?.kind != .penalty
-                ? PassIntent(targetID: choosePassTarget(from: selectedPlayerID, aim: actionKickAim), aim: actionKickAim) : nil
+                ? PassIntent(targetID: quickPassTarget(from: selectedPlayerID, aim: actionKickAim), aim: actionKickAim) : nil
         }
         actionTimestamp = timestamp?.isFinite == true ? timestamp : nil
         actionForward = player.facing
@@ -483,6 +664,7 @@ struct FootballSimulation {
         actionCommittedSlide = false
         actionReceiving = receiver != nil
         actionHeading = header != nil
+        actionHeaderOnPress = header.map { isAttackingCross(for: $0) } ?? false
         actionReceivingRemaining = max(0.01, tuning.queuedPassDuration)
         actionWasTackle = !hasControl && !actionReceiving && !actionHeading
         actionAllowsManualSwitch = mode != .solo && actionWasTackle && !isTackling && freeKickReadyTeam == nil
@@ -490,6 +672,10 @@ struct FootballSimulation {
         actionCancelled = curveRemaining > 0 || chipRemaining > 0 || (recoveryTimers[selectedPlayerID] ?? 0) > 0
         queuedPass = nil
         queuedHeader = nil
+        // A cross asks for a timed jump on button-down. Holding cannot retry a missed jump.
+        if actionHeaderOnPress, !actionCancelled {
+            armHeader(for: actionActorID, aim: actionKickAim, goalDirected: true)
+        }
     }
 
     /// External touch timestamps take ownership of this press's clock; simulation steps then never add time twice.
@@ -537,7 +723,8 @@ struct FootballSimulation {
         let offBallTap = actionWasTackle && !actionCancelled && !actionCommittedSlide
             && validDuration && duration < tuning.slideHoldThreshold
         let actor = actionActorID
-        let headingRelease = actionHeading && !actionCancelled && validDuration && phase == .playing
+        let headingRelease = actionHeading && !actionHeaderOnPress && !actionCancelled && validDuration && phase == .playing
+        let headerAlreadyRequested = actionHeading && actionHeaderOnPress
         let receivingRelease = actionReceiving && !actionCancelled && validDuration && phase == .playing
         let eligible = phase == .playing && !actionWasTackle && !actionCancelled && canKick && validDuration
         let aim = intendedKickAim(for: actor)
@@ -552,6 +739,7 @@ struct FootballSimulation {
         actionPassIntent = nil
         actionDown = false
         actionHeading = false
+        actionHeaderOnPress = false
         actionElapsed = 0
         actionCancelled = false
         actionWasTackle = false
@@ -568,6 +756,7 @@ struct FootballSimulation {
             armHeader(for: actor, aim: aim)
             return
         }
+        if headerAlreadyRequested { return }
         if receivingRelease {
             if eligible { performHumanKick(by: actor, aim: aim, heldFor: duration, backheel: backheel, passIntent: passIntent) }
             else { _ = armQueuedKick(for: actor, aim: aim, heldFor: duration, receiving: true, passIntent: passIntent) }
@@ -610,8 +799,18 @@ struct FootballSimulation {
             endAftertouch()
             return
         }
-        let isShot = duration >= tuning.holdThreshold
-        var aim = requested.normalized
+        if !clearingBoundary, duration >= tuning.holdThreshold, crossingOpportunity(for: actor) != nil,
+           let plan = CrossingMechanics.plan(origin: ball.position, crosser: roster[actor], roster: roster,
+                heldFor: duration, tuning: tuning, ends: ends, sequence: abilityKickSequence,
+                excludedReceiverIDs: crossingExclusions(for: actor)) {
+            launchCross(by: actor, plan: plan, human: true)
+            return
+        }
+        let tapAim = passIntent?.aim ?? requested
+        let quickShot = !backheel && duration < tuning.holdThreshold
+            && shouldShootQuickTap(from: actor, aim: tapAim, target: passIntent?.targetID)
+        let isShot = duration >= tuning.holdThreshold || quickShot
+        var aim = (quickShot ? tapAim : requested).normalized
         var lift = 0.0
         var landing: Vector2?
         let speed: Double
@@ -619,7 +818,7 @@ struct FootballSimulation {
             activePassTargetID = nil
             if assistedShotDirection(from: actor, aim: aim) != nil,
                let shot = KickMechanics.shot(origin: ball.position, aim: aim, team: roster[actor].team,
-                                             heldFor: duration, tuning: tuning) {
+                                             heldFor: duration, tuning: tuning, ends: ends) {
                 aim = shot.direction
                 lift = shot.verticalVelocity
                 speed = shot.speed
@@ -639,7 +838,7 @@ struct FootballSimulation {
                     let candidate = roster[target]
                     // His guard prevents reclaiming his own outgoing kick, not being
                     // chosen for an immediate one-two from a teammate.
-                    return candidate.team == roster[actor].team && !candidate.isSentOff
+                    return candidate.team == roster[actor].team && !candidate.isUnavailable
                         && !candidate.isTackling && candidate.fallProgress <= 0.001
                         && (recoveryTimers[target] ?? 0) <= 0 ? target : nil
                 }
@@ -679,10 +878,10 @@ struct FootballSimulation {
     private func throughBallRunner(from actor: Int, aim: Vector2, landing: Vector2) -> Int? {
         let travel = (landing - ball.position).length
         let offsidePlayers = mode == .match ? OffsideRules.snapshot(actor: actor, ball: ball.position,
-            roster: roster, restart: matchRestart?.kind)?.candidates ?? [] : []
+            roster: roster, restart: matchRestart?.kind, ends: ends)?.candidates ?? [] : []
         return roster.filter { candidate in
             guard candidate.id != actor, candidate.team == roster[actor].team, !candidate.isGoalkeeper,
-                  !candidate.isSentOff, !candidate.isTackling, !offsidePlayers.contains(candidate.id),
+                  !candidate.isUnavailable, !candidate.isTackling, !offsidePlayers.contains(candidate.id),
                   (recoveryTimers[candidate.id] ?? 0) <= 0 else { return false }
             let offset = candidate.state.position - ball.position
             return offset.dot(aim) > 1 && abs(offset.dot(aim.perpendicular)) <= 10
@@ -692,6 +891,35 @@ struct FootballSimulation {
             let b = ($1.state.position - landing).lengthSquared
             return abs(a - b) < 0.000001 ? $0.id < $1.id : a < b
         }?.id
+    }
+
+    private mutating func launchCross(by actor: Int, plan: CrossingMechanics.Plan, human: Bool) {
+        let launchMovement = validMovement
+        activePassTargetID = plan.receiverID
+        lastKickKind = "cross"
+        roster[actor].state.facing = plan.direction
+        kickBall(by: actor, aim: plan.direction, speed: plan.speed, isShot: false, human: human)
+        // The planner already applies rating error and power. Keep its solved physical flight.
+        ball.velocity = plan.direction * plan.speed
+        ball.height = plan.height
+        ball.verticalVelocity = plan.verticalVelocity
+        throughBallLandingPoint = plan.destination
+        crossFlight = CrossFlight(passerID: actor, receiverID: plan.receiverID,
+            destination: plan.destination, launchMovement: launchMovement,
+            remaining: max(2.5, plan.flightTime + 1))
+        if human { crossCount += 1 }
+        receiverControlRemaining = human ? max(2.5, plan.flightTime + 1) : 0
+        earlyPassAdjustment = nil
+        chipRemaining = 0
+        endAftertouch()
+        kickInputBaseline = nil
+    }
+
+    private func isAttackingCross(for actor: Int) -> Bool {
+        guard isCrossInFlight, let cross = crossFlight,
+              roster[actor].team == roster[cross.passerID].team else { return false }
+        let depth = Pitch.length / 2 - roster[actor].state.position.y * ends.attackSign(for: roster[actor].team)
+        return depth > 0 && depth <= 24 && abs(roster[actor].state.position.x) <= 20.5
     }
 
     private struct DistributionChoice {
@@ -724,7 +952,7 @@ struct FootballSimulation {
             acceleration: tuning.playerAcceleration * target.abilities.acceleration,
             deceleration: tuning.playerDeceleration, hands: hands, heldFor: duration,
             ability: KeeperDeliveryPlanner.ability(roster[actor].abilities),
-            blockers: roster.filter { $0.team != roster[actor].team && !$0.isSentOff }.map { $0.state.position },
+            blockers: roster.filter { $0.team != roster[actor].team && !$0.isUnavailable }.map { $0.state.position },
             tuning: tuning)
     }
 
@@ -736,10 +964,10 @@ struct FootballSimulation {
         let range = (held ? (hands ? 47 : 55) + 23 * power : hands ? 44 : 45) * quality
         let minimumDistance = held ? 20 + 12 * power : 1.8
         let offside = mode == .match ? OffsideRules.snapshot(actor: actor, ball: ball.position,
-            roster: roster, restart: matchRestart?.kind)?.candidates ?? [] : []
+            roster: roster, restart: matchRestart?.kind, ends: ends)?.candidates ?? [] : []
         let candidates = roster.filter { candidate in
             candidate.id != actor && candidate.team == roster[actor].team && !candidate.isGoalkeeper
-                && !candidate.isSentOff && !candidate.isTackling && candidate.fallProgress <= 0.001
+                && !candidate.isUnavailable && !candidate.isTackling && candidate.fallProgress <= 0.001
                 && (recoveryTimers[candidate.id] ?? 0) <= 0 && !offside.contains(candidate.id)
         }
         if let captured {
@@ -812,12 +1040,36 @@ struct FootballSimulation {
     }
 
     private func assistedShotDirection(from actor: Int, aim: Vector2) -> Vector2? {
-        let attack = roster[actor].team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: roster[actor].team)
         let goal = Vector2(x: 0, y: Pitch.length / 2 * attack)
         let offset = goal - ball.position
         guard offset.length <= min(32, tuning.shotAssistRange), offset.y * attack > 0,
               aim.dot(offset.normalized) >= cos(tuning.shotAssistAngle * .pi / 180) else { return nil }
         return offset.normalized
+    }
+
+    /// A short, deliberate passing option wins. Otherwise a goalward tap in the
+    /// danger area uses the same on-target shot physics as a minimally charged shot.
+    private func shouldShootQuickTap(from actor: Int, aim: Vector2, target: Int?) -> Bool {
+        guard mode == .match, matchRestart == nil, freeKickReadyTeam == nil,
+              !roster[actor].isGoalkeeper,
+              assistedShotDirection(from: actor, aim: aim.normalized) != nil else { return false }
+        let goal = ends.direction(for: roster[actor].team) * (Pitch.length / 2)
+        guard (goal - ball.position).length <= 24 else { return false }
+        if let target, !roster[target].isUnavailable,
+           (roster[target].state.position - roster[actor].state.position).length <= 18 { return false }
+        return choosePassTarget(from: actor, aim: aim, maximumDistance: 18) == nil
+    }
+
+    var quickTapWillShoot: Bool {
+        guard hasControl else { return false }
+        let aim = actionPassIntent?.aim ?? intendedKickAim(for: selectedPlayerID)
+        return shouldShootQuickTap(from: selectedPlayerID, aim: aim, target: actionPassIntent?.targetID)
+    }
+
+    private func quickPassTarget(from actor: Int, aim: Vector2) -> Int? {
+        let target = choosePassTarget(from: actor, aim: aim)
+        return shouldShootQuickTap(from: actor, aim: aim, target: target) ? nil : target
     }
 
     /// Used for touch cancellation, pause and interruption. This never releases a kick.
@@ -837,6 +1089,7 @@ struct FootballSimulation {
         actionWasTackle = false
         actionReceiving = false
         actionHeading = false
+        actionHeaderOnPress = false
         actionReceivingRemaining = 0
         actionAllowsManualSwitch = false
         actionStartedWithSelectionDirection = false
@@ -862,7 +1115,7 @@ struct FootballSimulation {
         tackleKinds.removeAll()
     }
 
-    mutating func reset(clearScore: Bool = false) {
+    mutating func reset(clearScore: Bool = false, preserveStartingEnds: Bool = false) {
         clearRestartSupport()
         resetOffsideForRestart()
         penaltyFlight = nil
@@ -872,6 +1125,16 @@ struct FootballSimulation {
         let clearScore = clearScore || mode == .match
         cancelInput()
         matchTimeElapsed = 0
+        matchHalf = 1
+        ends = MatchEnds()
+        periodElapsed = 0
+        stoppageTime = 0
+        periodHasStarted = false
+        opportunityGraceRemaining = 0
+        pendingInjuryID = nil
+        substitutionNotice = nil
+        substitutionNoticeRemaining = 0
+        unavailableSquadIDs.removeAll()
         matchRestart = nil
         lastTouchTeam = nil
         lastDeliberatePlayTeam = nil
@@ -880,6 +1143,8 @@ struct FootballSimulation {
         throughBallLandingPoint = nil
         goalkeeperSaveCount = 0
         headerCount = 0
+        crossCount = 0
+        crossFlight = nil
         lastHeaderPlayerID = nil
         headingTimers.removeAll()
         keeperStates.removeAll()
@@ -916,7 +1181,7 @@ struct FootballSimulation {
         randomState = 0x51CC_E2D4
         abilityKickSequence = 0
         if mode == .passing { configureExercise() }
-        else if mode == .match { configureMatch() }
+        else if mode == .match { configureMatch(chooseEnds: !preserveStartingEnds) }
         resetGeneration += 1
         if clearScore {
             northGoals = 0
@@ -947,7 +1212,14 @@ struct FootballSimulation {
         guard mode == .match, duration.isFinite, duration > 0 else { return }
         let savedNorthGoals = northGoals
         let savedSouthGoals = southGoals
-        reset(clearScore: true)
+        let savedRoster = roster
+        let savedUnavailable = unavailableSquadIDs
+        let savedInjuryRandom = injuryRandomState
+        reset(clearScore: true, preserveStartingEnds: true)
+        roster = savedRoster
+        unavailableSquadIDs = savedUnavailable
+        injuryRandomState = savedInjuryRandom
+        prepareMatchRestart(MatchRestart(kind: .kickoff, team: .blue, position: .zero, takerID: nil))
         tuning.matchDuration = duration
         northGoals = savedNorthGoals
         southGoals = savedSouthGoals
@@ -1194,20 +1466,38 @@ struct FootballSimulation {
                     && (segmentBall.position - positionAtSegmentStart(id)).length <= HeadingMechanics.reach + 0.4
                 // Receive a short friendly throw at the feet when it is already reachable.
                 // Automatic headers must not turn a simple outlet into a volley back at its thrower.
-                let canCushion = aiAttempt && isIntendedFriendlyPass(to: id)
+                let canCushion = aiAttempt && !isAttackingCross(for: id) && isIntendedFriendlyPass(to: id)
                     && neutralReceivingMeeting(for: id, reach: acquisitionReach(for: id), horizon: 0.4,
                         maximumRelativeSpeed: acquisitionSpeedLimit(for: id)) != nil
                 guard humanAttempt || (aiAttempt && !canCushion) else { continue }
-                if let time = HeadingMechanics.contactFraction(ball: segmentBall,
-                    relativeOffset: segmentBall.position - positionAtSegmentStart(id),
-                    relativeTravel: displacement - actorTravel(id), duration: remaining, gravity: tuning.ballGravity),
-                   time < earliest,
-                   !humanAttempt || elapsed + remaining * time <= (queuedHeader?.remaining ?? 0) {
-                    earliest = time
-                    contact = .header(id)
+                var delay = 0.0
+                if humanAttempt, queuedHeader?.goalDirected == true {
+                    var jumper = footballer
+                    jumper.state.position = positionAtSegmentStart(id)
+                    // A prepared jump meets the centre of the cross if reachable, instead of
+                    // always glancing it at the outer edge of the collision circle. A block,
+                    // save or boundary earlier on this same timeline still wins.
+                    guard let preferred = HeadingMechanics.preferredContactDelay(ball: segmentBall,
+                        player: jumper, window: min(0.2, queuedHeader!.remaining), gravity: tuning.ballGravity),
+                        preferred < remaining else { continue }
+                    delay = preferred
+                }
+                var contactBall = segmentBall
+                BallFlight.advance(&contactBall, dt: delay, gravity: tuning.ballGravity)
+                let startFraction = delay / remaining
+                let relativeTravel = displacement - actorTravel(id)
+                if let fraction = HeadingMechanics.contactFraction(ball: contactBall,
+                    relativeOffset: segmentBall.position - positionAtSegmentStart(id) + relativeTravel * startFraction,
+                    relativeTravel: relativeTravel * (1 - startFraction), duration: remaining - delay, gravity: tuning.ballGravity) {
+                    let time = startFraction + (1 - startFraction) * fraction
+                    if time < earliest,
+                       !humanAttempt || elapsed + remaining * time <= (queuedHeader?.remaining ?? 0) {
+                        earliest = time
+                        contact = .header(id)
+                    }
                 }
             }
-            for footballer in roster where !footballer.isSentOff {
+            for footballer in roster where !footballer.isUnavailable {
                 let id = footballer.id
                 if footballer.isGoalkeeper && (mode != .match || canHandleBall(id)) { continue }
                 let guardActive = mode == .solo ? reacquisitionCountdown > 0 : (kickGuards[id] ?? 0) > 0
@@ -1235,7 +1525,7 @@ struct FootballSimulation {
             }
 
             if mode == .match {
-                for keeper in roster where keeper.isGoalkeeper && !keeper.isSentOff && (kickGuards[keeper.id] ?? 0) <= 0
+                for keeper in roster where keeper.isGoalkeeper && !keeper.isUnavailable && (kickGuards[keeper.id] ?? 0) <= 0
                     && handlingRestrictedTeam != keeper.team {
                     if let owner = possessionID, roster[owner].team == keeper.team { continue }
                     let state = keeperStates[keeper.id] ?? GoalkeeperAI.State()
@@ -1296,12 +1586,12 @@ struct FootballSimulation {
                 }
             }
 
-            for tackler in roster where tackler.isSliding && !tackler.isSentOff && !tackleHits.contains(tackler.id) {
+            for tackler in roster where tackler.isSliding && !tackler.isUnavailable && !tackleHits.contains(tackler.id) {
                 let id = tackler.id
                 let tacklerStart = positionAtSegmentStart(id)
                 let possibleBallTime = ballTouchTime(id, radius: max(0.1, tuning.slideReach))
                 let ballTime = possibleBallTime.flatMap { eligibleHeight($0, maximum: tuning.airborneContactHeight) ? $0 : nil }
-                for opponent in roster where opponent.team != tackler.team && !opponent.isSentOff {
+                for opponent in roster where opponent.team != tackler.team && !opponent.isUnavailable {
                     let otherStart = positionAtSegmentStart(opponent.id)
                     let relative = tacklerStart - otherStart
                     let relativeTravel = actorTravel(id) - actorTravel(opponent.id)
@@ -1398,7 +1688,7 @@ struct FootballSimulation {
                     ball.verticalVelocity = 0
                     roster[id].state.position = positionAtSegmentStart(id)
                     roster[id].state.velocity = .zero
-                    ball.position = roster[id].state.position + (roster[id].team == .blue ? Vector2.up : -.up) * 0.6
+                    ball.position = roster[id].state.position + (ends.direction(for: roster[id].team)) * 0.6
                     ball.height = 1
                     endAftertouch()
                     chipRemaining = 0
@@ -1414,8 +1704,10 @@ struct FootballSimulation {
                 executeQueuedPass(by: id)
             case .header(let id):
                 let human = queuedHeader?.actorID == id
-                let aim = human ? queuedHeader!.aim : Vector2(x: -ball.position.x * 0.015, y: -1).normalized
-                performHeader(by: id, aim: aim, human: human)
+                let aim = human ? queuedHeader!.aim : (ends.direction(for: roster[id].team)
+                    + Vector2(x: -ball.position.x * 0.015, y: 0)).normalized
+                let preparedFor = human ? HeadingMechanics.prepareWindow - queuedHeader!.remaining + elapsed : 0.11
+                performHeader(by: id, aim: aim, human: human, preparedFor: preparedFor)
             case .slideBall(let id):
                 knockBallFromTackle(by: id)
             case .foul(let offender, let victim, let behind, let relativeSpeed):
@@ -1465,8 +1757,8 @@ struct FootballSimulation {
         let actor = roster[id]
         let carrier = roster[owner]
         guard id != owner, actor.team != carrier.team,
-              !actor.isSentOff, !actor.isGoalkeeper, !actor.isTackling,
-              !carrier.isSentOff, keeperHandsID != owner,
+              !actor.isUnavailable, !actor.isGoalkeeper, !actor.isTackling,
+              !carrier.isUnavailable, keeperHandsID != owner,
               (recoveryTimers[id] ?? 0) <= 0, (kickGuards[id] ?? 0) <= 0,
               queuedPass?.actorID != id, actor.state.velocity.length >= 1,
               ball.height <= tuning.airborneContactHeight,
@@ -1554,7 +1846,10 @@ struct FootballSimulation {
             && ball.height + Pitch.ballRadius * 2 <= Pitch.crossbarHeight
         if isGoal, let north {
             phase = .goal(north: north)
-            if north { northGoals += 1 } else { southGoals += 1 }
+            // Historical property names also serve practice mode; match totals belong to blue/red.
+            if mode == .match ? ends.attackingTeam(atNorthGoal: north) == .blue : north {
+                northGoals += 1
+            } else { southGoals += 1 }
         } else { phase = .outOfPlay }
         restartCountdown = max(0, tuning.restartDelay)
         if mode == .match {
@@ -1563,11 +1858,11 @@ struct FootballSimulation {
             let spot: Vector2
             if isGoal, let north {
                 kind = .kickoff
-                team = north ? .red : .blue
+                team = ends.attackingTeam(atNorthGoal: !north)
                 spot = .zero
             } else if let north {
-                let defending: Team = north ? .red : .blue
-                let attacking: Team = north ? .blue : .red
+                let defending: Team = ends.attackingTeam(atNorthGoal: !north)
+                let attacking: Team = ends.attackingTeam(atNorthGoal: north)
                 if lastTouchTeam == defending {
                     kind = .corner
                     team = attacking
@@ -1622,23 +1917,25 @@ struct FootballSimulation {
                 case "F": position.y = -4
                 default: position.y = min(-12, position.y - 10)
                 }
-                return home ? position : -position
+                return position * ends.attackSign(for: home ? .blue : .red)
             }
         }
         let local = id % 5
-        let sign = id < 5 ? -1.0 : 1.0
+        let sign = -ends.attackSign(for: id < 5 ? .blue : .red)
         if local == 4 { return Vector2(x: 0, y: sign * (Pitch.length / 2 - 2.5)) }
         return Vector2(x: local.isMultiple(of: 2) ? -12 : 12, y: sign * (local < 2 ? 25 : 10))
     }
 
-    private mutating func configureMatch() {
+    private mutating func configureMatch(chooseEnds: Bool = true) {
+        if chooseEnds { firstHalfBlueAttacksNorth = chooseStartingEnds() }
+        ends = MatchEnds(blueAttacksNorth: firstHalfBlueAttacksNorth)
         if let configuration {
             roster = [configuration.home, configuration.away].enumerated().flatMap { side, lineup in
                 lineup.players.enumerated().map { slot, profile in
                     let id = side * 11 + slot
                     var state = PlayerState()
                     state.position = startingMatchPosition(for: id)
-                    state.facing = side == 0 ? .up : -.up
+                    state.facing = ends.direction(for: side == 0 ? .blue : .red)
                     var footballer = Footballer(id: id, team: side == 0 ? .blue : .red, state: state)
                     footballer.isGoalkeeper = slot == 0
                     footballer.clubPlayer = profile
@@ -1653,7 +1950,7 @@ struct FootballSimulation {
         roster = (0..<10).map { id in
             var state = PlayerState()
             state.position = startingMatchPosition(for: id)
-            state.facing = id < 5 ? .up : -.up
+            state.facing = ends.direction(for: id < 5 ? .blue : .red)
             var footballer = Footballer(id: id, team: id < 5 ? .blue : .red, state: state)
             footballer.isGoalkeeper = id % 5 == 4
             return footballer
@@ -1688,7 +1985,10 @@ struct FootballSimulation {
             roster[id].fallProgress = 0
             roster[id].recoveryProgress = 0
             roster[id].goalkeeperDiveProgress = 0
-            if restart.kind == .kickoff { roster[id].state.position = startingMatchPosition(for: id) }
+            if restart.kind == .kickoff {
+                roster[id].state.position = startingMatchPosition(for: id)
+                roster[id].state.facing = ends.direction(for: roster[id].team)
+            }
         }
         if restart.kind == .penalty {
             placePenalty(for: restart.team)
@@ -1696,12 +1996,12 @@ struct FootballSimulation {
         }
         ball = BallState()
         ball.position = restart.position
-        let keeper = roster.first { $0.team == restart.team && $0.isGoalkeeper && !$0.isSentOff }?.id
+        let keeper = roster.first { $0.team == restart.team && $0.isGoalkeeper && !$0.isUnavailable }?.id
         let taker = restart.kind == .goalKick ? (keeper ?? nearestFootballer(team: restart.team, to: ball.position))
             : nearestFootballer(team: restart.team, to: ball.position)
-        let attack = restart.team == .blue ? Vector2.up : -Vector2.up
+        let attack = ends.direction(for: restart.team)
         let kickoffPartner = restart.kind == .kickoff ? roster.filter {
-            $0.team == restart.team && $0.id != taker && !$0.isGoalkeeper && !$0.isSentOff
+            $0.team == restart.team && $0.id != taker && !$0.isGoalkeeper && !$0.isUnavailable
         }.min {
             let a = ($0.state.position - ball.position).lengthSquared
             let b = ($1.state.position - ball.position).lengthSquared
@@ -1711,7 +2011,7 @@ struct FootballSimulation {
         let facing = restart.kind == .kickoff && kickoffPartner != nil ? lateral
             : restart.kind == .throwIn || restart.kind == .corner
                 ? (Vector2(x: 0, y: ball.position.y - attack.y * 6) - ball.position).normalized : attack
-        for id in roster.indices where !roster[id].isSentOff {
+        for id in roster.indices where !roster[id].isUnavailable {
             if id == taker {
                 roster[id].state.position = ball.position - facing * 1.2
                 roster[id].state.facing = facing
@@ -1754,22 +2054,22 @@ struct FootballSimulation {
     }
 
     private mutating func placePenalty(for team: Team) {
-        ball = BallState(position: PenaltyRules.mark(for: team), mode: .controlled)
-        let attack = team == .blue ? Vector2.up : -.up
+        ball = BallState(position: PenaltyRules.mark(for: team, ends: ends), mode: .controlled)
+        let attack = ends.direction(for: team)
         let taker = nearestFootballer(team: team, to: ball.position)
-        let defender = roster.first { $0.team != team && $0.isGoalkeeper && !$0.isSentOff }?.id
-        var occupied = [ball.position - attack * 1.2, PenaltyRules.goalkeeperPosition(defending: team)]
-        for id in roster.indices where !roster[id].isSentOff {
+        let defender = roster.first { $0.team != team && $0.isGoalkeeper && !$0.isUnavailable }?.id
+        var occupied = [ball.position - attack * 1.2, PenaltyRules.goalkeeperPosition(defending: team, ends: ends)]
+        for id in roster.indices where !roster[id].isUnavailable {
             roster[id].state.velocity = .zero
             if id == taker {
                 roster[id].state.position = ball.position - attack * 1.2
                 roster[id].state.facing = attack
             } else if id == defender {
-                roster[id].state.position = PenaltyRules.goalkeeperPosition(defending: team)
+                roster[id].state.position = PenaltyRules.goalkeeperPosition(defending: team, ends: ends)
                 roster[id].state.facing = -attack
             } else {
                 roster[id].state.position = PenaltyRules.waitingPosition(roster[id].state.position,
-                    attackingTeam: team, occupied: occupied)
+                    attackingTeam: team, occupied: occupied, ends: ends)
                 roster[id].state.facing = (ball.position - roster[id].state.position).normalized
                 occupied.append(roster[id].state.position)
             }
@@ -1789,8 +2089,8 @@ struct FootballSimulation {
     private mutating func launchPenalty(by actor: Int, aim: Vector2, heldFor duration: Double, human: Bool) {
         guard matchRestart?.kind == .penalty, possessionID == actor,
               let shot = PenaltyMechanics.shot(origin: ball.position, aim: aim, team: roster[actor].team,
-                                              heldFor: duration, tuning: tuning) else { return }
-        let keeper = roster.first { $0.team != roster[actor].team && $0.isGoalkeeper && !$0.isSentOff }?.id
+                                              heldFor: duration, tuning: tuning, ends: ends) else { return }
+        let keeper = roster.first { $0.team != roster[actor].team && $0.isGoalkeeper && !$0.isUnavailable }?.id
         activePassTargetID = nil
         if human { lastKickKind = shot.isOverhit ? "overhit penalty" : "penalty" }
         kickBall(by: actor, aim: shot.direction, speed: shot.speed, isShot: true, human: human)
@@ -1810,12 +2110,6 @@ struct FootballSimulation {
     @discardableResult
     private mutating func penalisePenaltyTouch(by actor: Int) -> Bool {
         guard mode == .match, phase == .playing, freeKickReadyTeam == nil, ballIsStillInPlay() else { return false }
-        if matchTimeRemaining <= 0.0000001, let flight = penaltyFlight, actor != flight.goalkeeperID {
-            // A period extended for a penalty ends at another outfield touch; the keeper's
-            // save/post ricochets may still carry the original shot over the goal line.
-            finishMatch()
-            return true
-        }
         guard penaltySecondTouchTakerID == actor else { return false }
         let awarded: Team = roster[actor].team == .blue ? .red : .blue
         let spot = ball.position
@@ -1842,7 +2136,7 @@ struct FootballSimulation {
 
     private mutating func launchAutomaticMatchRestart() {
         guard let restart = matchRestart, let taker = possessionID else { return }
-        let attack = roster[taker].team == .blue ? Vector2.up : -Vector2.up
+        let attack = ends.direction(for: roster[taker].team)
         if restart.kind == .penalty {
             // Deterministic varying corner aim; opposition uses the same physical shot profile.
             let lateral = taker.isMultiple(of: 2) ? 0.22 : -0.22
@@ -1907,6 +2201,7 @@ struct FootballSimulation {
     private mutating func recordBallTouch(by actor: Int, deliberate: Bool = false, controlled: Bool = false,
                                           save: Bool = false) {
         earlyPassAdjustment = nil
+        crossFlight = nil
         let team = roster[actor].team
         if let taker = penaltySecondTouchTakerID, actor != taker { penaltySecondTouchTakerID = nil }
         if let flight = penaltyFlight, actor != flight.takerID, actor != flight.goalkeeperID {
@@ -1918,7 +2213,7 @@ struct FootballSimulation {
             // Controlled possession and deliberate distribution begin a new attacking phase.
             if !save, deliberate || controlled || pendingOffside == nil || pendingOffside?.team == team {
                 pendingOffside = OffsideRules.snapshot(actor: actor, ball: ball.position, roster: roster,
-                    positions: offsideTouchPositions, restart: matchRestart?.kind)
+                    positions: offsideTouchPositions, restart: matchRestart?.kind, ends: ends)
             }
         }
         lastTouchTeam = team
@@ -1929,6 +2224,7 @@ struct FootballSimulation {
     }
 
     private mutating func resetOffsideForRestart() {
+        crossFlight = nil
         queuedHeader = nil
         headingTimers.removeAll(keepingCapacity: true)
         for id in roster.indices { roster[id].headingProgress = 0 }
@@ -1944,7 +2240,7 @@ struct FootballSimulation {
         if penalisePenaltyTouch(by: actor) { return true }
         guard mode == .match, phase == .playing, freeKickReadyTeam == nil,
               let snapshot = pendingOffside, snapshot.candidates.contains(actor),
-              roster[actor].team == snapshot.team, !roster[actor].isSentOff,
+              roster[actor].team == snapshot.team, !roster[actor].isUnavailable,
               ballIsStillInPlay() else { return false }
         let spot = offsideTouchPositions?.indices.contains(actor) == true
             ? offsideTouchPositions![actor] : roster[actor].state.position
@@ -1992,17 +2288,18 @@ struct FootballSimulation {
     private var keeperConfiguration: GoalkeeperAI.Configuration {
         var configuration = GoalkeeperAI.Configuration.defaults
         configuration.gravity = tuning.ballGravity
+        configuration.ends = ends
         return configuration
     }
 
     private func keeperConfiguration(for id: Int) -> GoalkeeperAI.Configuration {
         var configuration = keeperConfiguration
         let abilities = roster[id].abilities
-        configuration.movementSpeed *= abilities.speed
+        configuration.movementSpeed *= abilities.speed * (roster[id].team == .red ? tuning.difficulty.speedMultiplier : 1)
         configuration.acceleration *= abilities.acceleration
         configuration.catchSpeedLimit *= abilities.goalkeeping
         configuration.diveCatchSpeedLimit *= abilities.goalkeeping
-        configuration.diveLookAhead *= abilities.goalkeeping
+        configuration.diveLookAhead *= abilities.goalkeeping * (roster[id].team == .red ? tuning.difficulty.speedMultiplier : 1)
         configuration.standingReach *= 1 + (abilities.goalkeeping - 1) * 0.5
         configuration.diveReach *= 1 + (abilities.goalkeeping - 1) * 0.5
         configuration.recoveryDuration /= abilities.goalkeeping
@@ -2028,7 +2325,7 @@ struct FootballSimulation {
             if recovering { roster[id].state.facing = intent.facing }
             if hands {
                 let box = keeperConfiguration
-                let sign = roster[id].team == .blue ? -1.0 : 1.0
+                let sign = -ends.attackSign(for: roster[id].team)
                 roster[id].state.position.x = min(box.boxHalfWidth - 0.8,
                     max(-box.boxHalfWidth + 0.8, roster[id].state.position.x))
                 let depth = (Pitch.length / 2 - roster[id].state.position.y * sign)
@@ -2036,7 +2333,7 @@ struct FootballSimulation {
             }
         } else if possessionID == id, !hands {
             // The autonomous keeper's feet are an ordinary vulnerable dribble, with a short decision delay.
-            let direction = roster[id].team == .blue ? Vector2.up : -.up
+            let direction = ends.direction(for: roster[id].team)
             moveExerciseFootballer(id, stick: direction * 0.4, speedScale: tuning.keeperFootSpeedScale, dt: dt)
         } else {
             roster[id].state.velocity = intent.velocity
@@ -2047,7 +2344,7 @@ struct FootballSimulation {
     }
 
     private mutating func distributeFromGoalkeeper(_ keeper: Int) {
-        let attack = roster[keeper].team == .blue ? Vector2.up : -.up
+        let attack = ends.direction(for: roster[keeper].team)
         let tap = distributionChoice(from: keeper, aim: attack, heldFor: 0.12, hands: true)
         let duration = tap.targetID == nil ? 0.75 : 0.12
         releaseDistribution(by: keeper, choice: duration < tuning.holdThreshold ? tap
@@ -2058,13 +2355,13 @@ struct FootballSimulation {
     private var validRegroupingKeeper: Int? {
         guard mode == .match, phase == .playing, let keeper = keeperHandsID,
               possessionID == keeper, roster.indices.contains(keeper),
-              !roster[keeper].isSentOff, roster[keeper].isGoalkeeper else { return nil }
+              !roster[keeper].isUnavailable, roster[keeper].isGoalkeeper else { return nil }
         return keeper
     }
 
     private func shortOutletPosition(for id: Int, keeper: Int) -> Vector2 {
         let carrier = roster[keeper]
-        let attack = carrier.team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: carrier.team)
         let offset = roster[id].state.position.x - carrier.state.position.x
         let side = abs(offset) > 0.5 ? (offset > 0 ? 1.0 : -1.0) : (id.isMultiple(of: 2) ? -1.0 : 1.0)
         return Vector2(x: min(27, max(-27, carrier.state.position.x + side * 6.5)),
@@ -2079,7 +2376,7 @@ struct FootballSimulation {
         }
         let team = roster[keeper].team
         func available(_ id: Int) -> Bool {
-            roster.indices.contains(id) && roster[id].team == team && !roster[id].isSentOff
+            roster.indices.contains(id) && roster[id].team == team && !roster[id].isUnavailable
                 && !roster[id].isGoalkeeper && !roster[id].isTackling && roster[id].fallProgress <= 0.001
                 && (recoveryTimers[id] ?? 0) <= 0
         }
@@ -2090,7 +2387,7 @@ struct FootballSimulation {
         shortOutletID = roster.filter { available($0.id) }.min { first, second in
             func score(_ candidate: Footballer) -> Double {
                 let target = shortOutletPosition(for: candidate.id, keeper: keeper)
-                let opponentGap = roster.filter { $0.team != team && !$0.isSentOff }
+                let opponentGap = roster.filter { $0.team != team && !$0.isUnavailable }
                     .map { ($0.state.position - target).length }.min() ?? 20
                 return (candidate.state.position - target).length + max(0, 6 - opponentGap) * 2
             }
@@ -2103,11 +2400,11 @@ struct FootballSimulation {
     /// immediately when hands possession ends; no player is moved directly to these positions.
     func keeperRegroupTarget(for id: Int) -> Vector2? {
         guard let keeper = validRegroupingKeeper, roster.indices.contains(id),
-              !roster[id].isGoalkeeper, !roster[id].isSentOff else { return nil }
+              !roster[id].isGoalkeeper, !roster[id].isUnavailable else { return nil }
         let holdingTeam = roster[keeper].team
         if id == keeperShortOutletID { return shortOutletPosition(for: id, keeper: keeper) }
         let friendly = roster[id].team == holdingTeam
-        let attack = holdingTeam == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: holdingTeam)
         var target = matchFormationTarget(for: id, inPossession: friendly)
         let members = roster.filter { $0.team == roster[id].team && !$0.isGoalkeeper }.map(\.id)
         let slot = members.firstIndex(of: id) ?? 0
@@ -2132,7 +2429,7 @@ struct FootballSimulation {
     private func mustWithdrawFromKeeper(_ id: Int, keeper: Int, position: Vector2? = nil) -> Bool {
         guard roster[id].team != roster[keeper].team else { return false }
         let point = position ?? roster[id].state.position
-        let attack = roster[keeper].team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: roster[keeper].team)
         let depth = Pitch.length / 2 + point.y * attack
         return (abs(point.x) < keeperConfiguration.boxHalfWidth + 1.5
                 && depth < keeperConfiguration.boxDepth + 1.5)
@@ -2164,7 +2461,7 @@ struct FootballSimulation {
         let offset = point - carrier
         guard offset.length >= 4, offset.length <= keeperThrowRange(heldFor: 0.15),
               (point - shortOutletPosition(for: outlet, keeper: keeper)).length < 3 else { return false }
-        for opponent in roster where opponent.team != roster[keeper].team && !opponent.isSentOff {
+        for opponent in roster where opponent.team != roster[keeper].team && !opponent.isUnavailable {
             if mustWithdrawFromKeeper(opponent.id, keeper: keeper) { return false }
             let projection = min(1, max(0, (opponent.state.position - carrier).dot(offset) / max(0.01, offset.lengthSquared)))
             if (opponent.state.position - (carrier + offset * projection)).length < 3 { return false }
@@ -2174,7 +2471,7 @@ struct FootballSimulation {
 
     private func matchFormationTarget(for id: Int, inPossession: Bool) -> Vector2 {
         let team = roster[id].team
-        let attack = team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: team)
         if let configuration {
             let lineup = team == .blue ? configuration.home : configuration.away
             let slot = lineup.formation.slots[id % 11]
@@ -2233,7 +2530,7 @@ struct FootballSimulation {
     private mutating func stepExercise(dt: Double) {
         dribbleCountdown = max(0, dribbleCountdown - dt)
         switchCountdown = max(0, switchCountdown - dt)
-        aiDecisionCountdown = max(0, aiDecisionCountdown - dt)
+        aiDecisionCountdown = max(0, aiDecisionCountdown - dt / tuning.difficulty.decisionInterval)
         advanceRecoveryTimers(dt: dt)
         refreshExerciseControl()
         guard phase == .playing else { return }
@@ -2274,11 +2571,11 @@ struct FootballSimulation {
             return offset / max(1.5, offset.length)
         }
         for id in roster.indices {
-            if mode == .match, roster[id].isGoalkeeper, !roster[id].isSentOff {
+            if mode == .match, roster[id].isGoalkeeper, !roster[id].isUnavailable {
                 moveGoalkeeper(id, dt: dt)
                 continue
             }
-            guard !roster[id].isSentOff, !roster[id].isGoalkeeper else {
+            guard !roster[id].isUnavailable, !roster[id].isGoalkeeper else {
                 roster[id].state.velocity = .zero
                 continue
             }
@@ -2287,7 +2584,7 @@ struct FootballSimulation {
             } else {
                 let recoveryScale = (recoveryTimers[id] ?? 0) > 0 ? 0.4 : 1.0
                 let offBallBoost = possessionID == id ? 1.0 : max(1, tuning.offBallSpeedBoost)
-                let speedScale = (id == selectedPlayerID ? 1 : tuning.aiSpeedScale) * recoveryScale * offBallBoost
+                let speedScale = (id == selectedPlayerID ? 1 : aiMovementScale(for: id)) * recoveryScale * offBallBoost
                 moveExerciseFootballer(id, stick: intents[id], speedScale: speedScale, dt: dt)
             }
         }
@@ -2295,7 +2592,7 @@ struct FootballSimulation {
 
         refreshExerciseControl(allowAcquisition: false)
         if let owner = keeperHandsID, possessionID == owner {
-            ball.position = roster[owner].state.position + (roster[owner].team == .blue ? Vector2.up : -.up) * 0.6
+            ball.position = roster[owner].state.position + (ends.direction(for: roster[owner].team)) * 0.6
             ball.velocity = .zero
             ball.height = 1.0
             ball.verticalVelocity = 0
@@ -2349,8 +2646,8 @@ struct FootballSimulation {
     }
 
     private mutating func separateFootballers() {
-        for first in roster.indices where !roster[first].isSentOff {
-            for second in roster.indices where second > first && !roster[second].isSentOff {
+        for first in roster.indices where !roster[first].isUnavailable {
+            for second in roster.indices where second > first && !roster[second].isUnavailable {
                 let offset = roster[second].state.position - roster[first].state.position
                 let distance = offset.length
                 let overlap = Pitch.playerRadius * 2 - distance
@@ -2368,14 +2665,14 @@ struct FootballSimulation {
     private mutating func refreshExerciseControl(allowAcquisition: Bool = true) {
         let wasIncoming = ball.mode == .pass || (ball.mode == .free && ball.velocity.length > 2)
         let oldOwner = possessionID
-        if let id = keeperHandsID, possessionID == id, !roster[id].isSentOff {
+        if let id = keeperHandsID, possessionID == id, !roster[id].isUnavailable {
             controlClaim = selectedPlayerID == id
             ball.mode = .controlled
             return
         }
         if let id = possessionID {
             let state = roster[id].state
-            if roster[id].isSentOff || roster[id].isTackling || ball.height > tuning.airborneContactHeight
+            if roster[id].isUnavailable || roster[id].isTackling || ball.height > tuning.airborneContactHeight
                 || (kickGuards[id] ?? 0) > 0 || (ball.position - state.position).length > controlReleaseDistance(for: id)
                 || (ball.velocity - state.velocity).length > controlSpeedLimit(for: id) * 1.25 {
                 possessionID = nil
@@ -2383,7 +2680,7 @@ struct FootballSimulation {
         }
 
         let candidates = roster.filter { candidate in
-            guard allowAcquisition, !candidate.isSentOff, !candidate.isTackling,
+            guard allowAcquisition, !candidate.isUnavailable, !candidate.isTackling,
                   !candidate.isGoalkeeper || (mode == .match && !canHandleBall(candidate.id)),
                   queuedPass?.actorID != candidate.id, ball.height <= tuning.airborneContactHeight,
                   (kickGuards[candidate.id] ?? 0) <= 0 else { return false }
@@ -2429,7 +2726,7 @@ struct FootballSimulation {
         guard !penaliseOffsideInvolvement(by: owner) else { return }
         let speed = state.velocity.length
         recordBallTouch(by: owner, controlled: true)
-        let attackingDirection = roster[owner].team == .blue ? Vector2.up : -Vector2.up
+        let attackingDirection = ends.direction(for: roster[owner].team)
         let preparingAITurn = owner != selectedPlayerID
             && (offset.dot(attackingDirection) < 0.2 || state.velocity.dot(attackingDirection) < -0.2)
         if speed < 0.35 || preparingAITurn {
@@ -2458,7 +2755,7 @@ struct FootballSimulation {
     private func choosePassTarget(from passer: Int, aim: Vector2, maximumDistance: Double? = nil) -> Int? {
         guard aim.length > 0.0001 else { return nil }
         let offsidePlayers = mode == .match ? OffsideRules.snapshot(actor: passer, ball: ball.position,
-            roster: roster, restart: matchRestart?.kind)?.candidates ?? [] : []
+            roster: roster, restart: matchRestart?.kind, ends: ends)?.candidates ?? [] : []
         let direction = aim.normalized
         let minimumAlignment = cos(min(85, max(1, tuning.passAssistAngle)) * .pi / 180)
         let origin = roster[passer].state.position
@@ -2467,7 +2764,7 @@ struct FootballSimulation {
         var bestID: Int?
         var bestScore = -Double.infinity
         for candidate in roster where candidate.team == team && candidate.id != passer
-            && !candidate.isSentOff && (!candidate.isGoalkeeper || mode == .match) && !candidate.isTackling
+            && !candidate.isUnavailable && (!candidate.isGoalkeeper || mode == .match) && !candidate.isTackling
             && candidate.fallProgress <= 0.001 && (recoveryTimers[candidate.id] ?? 0) <= 0 {
             guard !offsidePlayers.contains(candidate.id) else { continue }
             let offset = candidate.state.position - origin
@@ -2550,7 +2847,7 @@ struct FootballSimulation {
         guard lengthSquared > 0.01 else { return (0, 0) }
         var laneRisk = 0.0
         var receiverRisk = 0.0
-        for opponent in roster where opponent.team != team && !opponent.isSentOff {
+        for opponent in roster where opponent.team != team && !opponent.isUnavailable {
             let projection = (opponent.state.position - ball.position).dot(travel) / lengthSquared
             if projection > 0.06, projection < 0.94 {
                 let projected = opponent.state.position + opponent.state.velocity * min(0.65, max(0, arrivalTime * projection))
@@ -2567,7 +2864,7 @@ struct FootballSimulation {
 
     private func isIntendedFriendlyPass(to id: Int) -> Bool {
         guard mode != .solo, ball.mode == .pass, activePassTargetID == id,
-              !roster[id].isGoalkeeper, !roster[id].isSentOff,
+              !roster[id].isGoalkeeper, !roster[id].isUnavailable,
               let kicker = lastKickerID, roster[kicker].team == roster[id].team else { return false }
         return possessionID == nil || possessionID == id
     }
@@ -2617,6 +2914,14 @@ struct FootballSimulation {
     }
 
     private mutating func advanceRecoveryTimers(dt: Double) {
+        if crossFlight != nil {
+            crossFlight!.remaining -= dt
+            if !isCrossInFlight || crossFlight!.remaining <= 0 {
+                crossFlight = nil
+            } else if (validMovement - crossFlight!.launchMovement).length > 0.25 {
+                crossFlight!.manualSteering = true
+            }
+        }
         recentKickAimRemaining = max(0, recentKickAimRemaining - dt)
         rememberDeliberateKickAim()
         runningWinProtection = max(0, runningWinProtection - dt)
@@ -2654,7 +2959,7 @@ struct FootballSimulation {
         }
         if queuedPass != nil {
             queuedPass!.remaining -= dt
-            if queuedPass!.remaining <= 0 || roster[queuedPass!.actorID].isSentOff { queuedPass = nil }
+            if queuedPass!.remaining <= 0 || roster[queuedPass!.actorID].isUnavailable { queuedPass = nil }
         }
         if let header = queuedHeader {
             queuedHeader!.remaining -= dt
@@ -2716,7 +3021,7 @@ struct FootballSimulation {
             curveRemaining = tuning.aftertouchDuration
         }
         if human, !isShot, mode != .solo, let receiver = activePassTargetID,
-           roster[receiver].team == .blue, !roster[receiver].isSentOff, !roster[receiver].isGoalkeeper || mode == .match {
+           roster[receiver].team == .blue, !roster[receiver].isUnavailable, !roster[receiver].isGoalkeeper || mode == .match {
             // An assisted pass deliberately hands joystick control to its intended receiver now,
             // while the independently moving ball is still in flight.
             selectBlue(receiver)
@@ -2743,12 +3048,12 @@ struct FootballSimulation {
               possessionID == nil, ball.mode == .pass, isControllingPassReceiver,
               selectedPlayerID == pending.receiverID, activePassTargetID == pending.receiverID,
               !actionDown, queuedPass == nil, queuedHeader == nil,
-              !roster[pending.receiverID].isTackling, !roster[pending.receiverID].isSentOff else {
+              !roster[pending.receiverID].isTackling, !roster[pending.receiverID].isUnavailable else {
             earlyPassAdjustment = nil
             return
         }
         let receiver = roster[pending.receiverID]
-        let opponents = roster.filter { $0.team != receiver.team && !$0.isSentOff }.map { opponent in
+        let opponents = roster.filter { $0.team != receiver.team && !$0.isUnavailable }.map { opponent in
             EarlyPassAdjustment.Opponent(position: opponent.state.position,
                 maximumSpeed: max(opponent.state.velocity.length,
                     tuning.playerMaxSpeed * tuning.offBallSpeedBoost * opponent.abilities.speed),
@@ -2823,12 +3128,12 @@ struct FootballSimulation {
     }
 
     private func eligibleReceiver(_ id: Int) -> Bool {
-        !roster[id].isSentOff && (!roster[id].isGoalkeeper || mode == .match) && !roster[id].isTackling
+        !roster[id].isUnavailable && (!roster[id].isGoalkeeper || mode == .match) && !roster[id].isTackling
             && (recoveryTimers[id] ?? 0) <= 0 && (kickGuards[id] ?? 0) <= 0
     }
 
     private func eligibleHeader(_ id: Int) -> Bool {
-        roster.indices.contains(id) && !roster[id].isGoalkeeper && !roster[id].isSentOff
+        roster.indices.contains(id) && !roster[id].isGoalkeeper && !roster[id].isUnavailable
             && !roster[id].isTackling && roster[id].fallProgress <= 0.001
             && (recoveryTimers[id] ?? 0) <= 0 && (kickGuards[id] ?? 0) <= 0
             && (headingTimers[id] ?? 0) <= 0
@@ -2842,13 +3147,14 @@ struct FootballSimulation {
             gravity: tuning.ballGravity).map { $0 * window }
     }
 
-    private mutating func armHeader(for actor: Int, aim: Vector2) {
+    private mutating func armHeader(for actor: Int, aim: Vector2, goalDirected: Bool = false) {
         guard phase == .playing, eligibleHeader(actor), keeperHandsID == nil, ballIsStillInPlay(),
               ball.height > tuning.airborneContactHeight,
               headerArrival(for: actor, window: HeadingMechanics.prepareWindow) != nil else { return }
         queuedPass = nil
         queuedHeader = QueuedHeader(actorID: actor,
             aim: aim.length > 0.0001 ? aim.normalized : roster[actor].state.facing,
+            goalDirected: goalDirected,
             remaining: HeadingMechanics.prepareWindow)
         if (ball.position - roster[actor].state.position).length <= HeadingMechanics.reach,
            ball.height >= HeadingMechanics.minimumHeight, ball.height <= HeadingMechanics.maximumHeight {
@@ -2856,19 +3162,30 @@ struct FootballSimulation {
         }
     }
 
-    private mutating func performHeader(by actor: Int, aim: Vector2, human: Bool) {
+    private mutating func performHeader(by actor: Int, aim: Vector2, human: Bool, preparedFor: Double = 0) {
         guard eligibleHeader(actor), ballIsStillInPlay(), !penaliseOffsideInvolvement(by: actor) else { return }
         let contactHeight = ball.height
         let speed = min(28, max(16, 14 + ball.velocity.length * 0.35))
+        let attacking = isAttackingCross(for: actor) && (!human || queuedHeader?.goalDirected == true)
+        var contactPlayer = roster[actor]
+        if let positions = offsideTouchPositions, positions.indices.contains(actor) {
+            contactPlayer.state.position = positions[actor]
+        }
+        let finish = attacking ? HeadingMechanics.attackingHeader(ball: ball, player: contactPlayer,
+            preparedFor: preparedFor, tuning: tuning, ends: ends,
+            variation: sin(Double(abilityKickSequence + 1) * 2.399963229728653 + Double(actor) * 0.754877666)) : nil
         queuedHeader = nil
         queuedPass = nil
         activePassTargetID = nil
-        roster[actor].state.facing = aim.normalized
-        kickBall(by: actor, aim: aim, speed: speed, isShot: false, human: human)
+        let goalDirection = (ends.direction(for: roster[actor].team) * (Pitch.length / 2) - ball.position).normalized
+        let direction = finish?.direction ?? (attacking ? goalDirection : aim.normalized)
+        roster[actor].state.facing = direction
+        kickBall(by: actor, aim: direction, speed: finish?.speed ?? speed, isShot: finish != nil, human: human)
+        if let finish { ball.velocity = finish.direction * finish.speed }
         // A deliberate header is a new offside snapshot, but is not a foot backpass.
         handlingRestrictedTeam = nil
         ball.height = contactHeight
-        ball.verticalVelocity = 1.5
+        ball.verticalVelocity = finish?.verticalVelocity ?? 1.5
         chipRemaining = 0
         endAftertouch()
         kickInputBaseline = nil
@@ -2965,7 +3282,7 @@ struct FootballSimulation {
         let footTravel = direction * max(0.01, tuning.tackleReach * roster[actor].abilities.defending)
         let ballFraction = canTouchBall ? sweptCircle(from: state.position, by: footTravel,
                                                     center: ball.position, radius: Pitch.ballRadius) : nil
-        let opponents = roster.filter { !$0.isSentOff && $0.team != roster[actor].team }.compactMap { opponent -> (Int, Double)? in
+        let opponents = roster.filter { !$0.isUnavailable && $0.team != roster[actor].team }.compactMap { opponent -> (Int, Double)? in
             guard let time = sweptCircle(from: state.position, by: footTravel, center: opponent.state.position,
                                          radius: Pitch.playerRadius * 0.65) else { return nil }
             return (opponent.id, time)
@@ -3005,6 +3322,110 @@ struct FootballSimulation {
     private mutating func nextRandomUnit() -> Double {
         randomState = randomState &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
         return Double(randomState >> 11) / Double(UInt64(1) << 53)
+    }
+
+    private func replacements(for id: Int) -> [ClubPlayer] {
+        let team = roster[id].team
+        let squad: [ClubPlayer]
+        if let configuration {
+            squad = (team == .blue ? configuration.home : configuration.away).team.players
+        } else {
+            squad = (1...5).map { index in
+                let identity = "reserve-\(team.rawValue)-\(index)"
+                return ClubPlayer(id: identity, name: "Reserve \(index)", position: index == 1 ? "G" : "M",
+                    jerseyNumber: 10 + index, appearance: .generated(for: identity))
+            }
+        }
+        let used = Set(roster.filter { $0.team == team }.compactMap { $0.clubPlayer?.id })
+        return squad.filter {
+            !used.contains($0.id) && !unavailableSquadIDs.contains($0.id)
+                && (($0.role == "G") == roster[id].isGoalkeeper)
+        }.sorted {
+            $0.effectiveRating == $1.effectiveRating ? $0.id < $1.id : $0.effectiveRating > $1.effectiveRating
+        }
+    }
+
+    private mutating func resolveFoulInjury() {
+        guard mode == .match, let foul = lastFoul else { return }
+        // Independent sequence: injuries never change existing card/kick randomness.
+        injuryRandomState = injuryRandomState &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        let roll = Double(injuryRandomState >> 11) / Double(UInt64(1) << 53)
+        guard roll < min(1, max(0, tuning.foulInjuryChance)) else { return }
+        let id = foul.victimID
+        roster[id].isInjured = true
+        substitutionNotice = "\(roster[id].clubPlayer?.displayName ?? "Player \(id + 1)") leaves injured"
+        substitutionNoticeRemaining = 7
+        if let identity = roster[id].clubPlayer?.id { unavailableSquadIDs.insert(identity) }
+        accountForStoppage(6) // Treatment allowance; time spent browsing the squad is paused.
+        cancelInput()
+        if roster[id].team == .blue {
+            pendingInjuryID = id
+        } else if let replacement = replacements(for: id).first {
+            replaceInjuredPlayer(id, with: replacement)
+        }
+    }
+
+    @discardableResult
+    mutating func substituteInjuredPlayer(with playerID: String) -> Bool {
+        guard let id = pendingInjuryID, roster[id].isInjured, !roster[id].isSentOff,
+              let replacement = replacements(for: id).first(where: { $0.id == playerID }),
+              let foul = lastFoul else { return false }
+        replaceInjuredPlayer(id, with: replacement)
+        pendingInjuryID = nil
+        prepareFreeKick(for: foul.awardedTeam)
+        return true
+    }
+
+    mutating func continueWithoutInjuryReplacement() {
+        guard pendingInjuryID != nil, injuryReplacements.isEmpty, let foul = lastFoul else { return }
+        pendingInjuryID = nil
+        prepareFreeKick(for: foul.awardedTeam)
+    }
+
+    private mutating func replaceInjuredPlayer(_ id: Int, with replacement: ClubPlayer) {
+        let outgoing = roster[id]
+        substitutionNotice = "\(replacement.displayName) on for injured \(outgoing.clubPlayer?.displayName ?? "player \(id + 1)")"
+        substitutionNoticeRemaining = 7
+        if let identity = outgoing.clubPlayer?.id { unavailableSquadIDs.insert(identity) }
+        roster[id] = Footballer(id: id, team: outgoing.team,
+            state: PlayerState(position: outgoing.state.position, facing: outgoing.state.facing))
+        roster[id].isGoalkeeper = outgoing.isGoalkeeper
+        roster[id].clubPlayer = replacement
+        keeperStates[id] = nil
+        keeperIntents[id] = nil
+        kickGuards[id] = nil
+        recoveryTimers[id] = nil
+        tackleTimers[id] = nil
+        rearPressure.removeAll()
+    }
+
+    func aiMovementScale(for id: Int) -> Double {
+        tuning.aiSpeedScale * (roster[id].team == .red ? tuning.difficulty.speedMultiplier : 1)
+    }
+
+    /// Hard opponents assess lane clearance, receiver space and forward progress.
+    /// Easier levels retain the familiar directional pass selection.
+    func intelligentOpponentPassTarget(from owner: Int) -> Int? {
+        guard tuning.difficulty == .hard else { return choosePassTarget(from: owner, aim: ends.direction(for: roster[owner].team)) }
+        let origin = roster[owner].state.position
+        let offside = OffsideRules.snapshot(actor: owner, ball: ball.position, roster: roster, ends: ends)?.candidates ?? []
+        let candidates = roster.filter {
+            $0.team == .red && $0.id != owner && !$0.isUnavailable && !$0.isGoalkeeper
+                && !offside.contains($0.id) && ($0.state.position - origin).length < tuning.passAssistRange
+                && ($0.state.position - origin).length > 4
+        }
+        let opponents = roster.filter { $0.team == .blue && !$0.isUnavailable }
+        return candidates.compactMap { candidate -> (Int, Double)? in
+            let offset = candidate.state.position - origin
+            let clearance = opponents.map { opponent -> Double in
+                let projection = min(1, max(0, (opponent.state.position - origin).dot(offset) / max(0.01, offset.lengthSquared)))
+                return (opponent.state.position - (origin + offset * projection)).length
+            }.min() ?? 20
+            guard clearance > 2.2 else { return nil }
+            let progress = (candidate.state.position.y - origin.y) * ends.attackSign(for: roster[owner].team)
+            let space = opponents.map { ($0.state.position - candidate.state.position).length }.min() ?? 20
+            return (candidate.id, progress * 0.7 + min(space, 12) + min(clearance, 8) - offset.length * 0.12)
+        }.max { $0.1 < $1.1 }?.0
     }
 
     private mutating func commitFoul(offender: Int, victim: Int, decision: TackleDecision) {
@@ -3106,14 +3527,17 @@ struct FootballSimulation {
                 roster[foul.offenderID].recoveryProgress = min(1, max(0, (progress - 0.10) / 0.63))
             }
         }
-        if restartCountdown <= 0 { prepareFreeKick(for: team) }
+        if restartCountdown <= 0 {
+            resolveFoulInjury()
+            if pendingInjuryID == nil { prepareFreeKick(for: team) }
+        }
     }
 
     @discardableResult
     private mutating func checkPracticeCanContinue() -> Bool {
         guard mode != .solo else { return true }
         for team in [Team.blue, Team.red] {
-            if !roster.contains(where: { $0.team == team && !$0.isSentOff && !$0.isGoalkeeper }) {
+            if !roster.contains(where: { $0.team == team && !$0.isUnavailable && !$0.isGoalkeeper }) {
                 phase = .practiceEnded(losingTeam: team)
                 ball.velocity = .zero
                 ball.verticalVelocity = 0
@@ -3144,7 +3568,7 @@ struct FootballSimulation {
             roster[id].isGoalkeeper = discipline[id].2
         }
         guard checkPracticeCanContinue() else { return }
-        if mode != .solo, roster[selectedPlayerID].isSentOff || roster[selectedPlayerID].isGoalkeeper {
+        if mode != .solo, roster[selectedPlayerID].isUnavailable || roster[selectedPlayerID].isGoalkeeper {
             selectedPlayerID = nearestFootballer(team: .blue, to: ball.position)
             ball.position = player.position + .up * 1.25
             possessionID = selectedPlayerID
@@ -3158,9 +3582,9 @@ struct FootballSimulation {
         throughBallLandingPoint = nil
         guard checkPracticeCanContinue(), let foul = lastFoul else { return }
         if mode == .match, PenaltyRules.awardsPenalty(at: foul.position,
-            offender: roster[foul.offenderID].team, awarded: team) {
+            offender: roster[foul.offenderID].team, awarded: team, ends: ends) {
             prepareMatchRestart(MatchRestart(kind: .penalty, team: team,
-                position: PenaltyRules.mark(for: team), takerID: nil))
+                position: PenaltyRules.mark(for: team, ends: ends), takerID: nil))
             return
         }
         penaltyFlight = nil
@@ -3172,7 +3596,7 @@ struct FootballSimulation {
         ball.position = Vector2(x: min(Pitch.width / 2 - 0.5, max(-Pitch.width / 2 + 0.5, foul.position.x)),
                                 y: min(Pitch.length / 2 - 0.5, max(-Pitch.length / 2 + 0.5, foul.position.y)))
         let kicker = nearestFootballer(team: team, to: ball.position)
-        let attack = team == .blue ? Vector2.up : -Vector2.up
+        let attack = ends.direction(for: team)
         for id in roster.indices {
             roster[id].state.velocity = .zero
             roster[id].fallProgress = 0
@@ -3180,7 +3604,7 @@ struct FootballSimulation {
             roster[id].fallDirection = .up
             roster[id].isSliding = false
             roster[id].goalkeeperDiveProgress = 0
-            guard !roster[id].isSentOff else { continue }
+            guard !roster[id].isUnavailable else { continue }
             if id == kicker {
                 roster[id].state.position = ball.position - attack * 1.2
                 roster[id].state.facing = attack
@@ -3235,7 +3659,7 @@ struct FootballSimulation {
         guard let restart = restartSupportContext, roster.indices.contains(id) else { return false }
         let player = roster[id]
         return player.team == restart.team && id != restart.takerID && !player.isGoalkeeper
-            && !player.isSentOff && !player.isTackling && !player.isSliding
+            && !player.isUnavailable && !player.isTackling && !player.isSliding
             && player.fallProgress <= 0.001 && player.recoveryProgress <= 0.001
             && (recoveryTimers[id] ?? 0) <= 0
     }
@@ -3250,7 +3674,7 @@ struct FootballSimulation {
             || restartOutletTargets.count != restartOutletIDs.count else { return }
         let unavailable = Set(recoveryTimers.filter { $0.value > 0 }.map(\.key))
         let layout = RestartSupport.layout(for: context, roster: roster, unavailableIDs: unavailable,
-            previousOutletIDs: restartOutletIDs, freeKickStandBack: tuning.freeKickStandBack)
+            previousOutletIDs: restartOutletIDs, freeKickStandBack: tuning.freeKickStandBack, ends: ends)
         restartOutletIDs = layout.outletIDs
         restartOutletTargets = layout.outletTargets
     }
@@ -3268,7 +3692,7 @@ struct FootballSimulation {
                 roster[id].state.facing = (ball.position - roster[id].state.position).normalized
             } else {
                 moveExerciseFootballer(id, stick: offset / max(1.5, offset.length),
-                    speedScale: max(0, tuning.aiSpeedScale) * max(1, tuning.offBallSpeedBoost), dt: dt)
+                    speedScale: max(0, aiMovementScale(for: id)) * max(1, tuning.offBallSpeedBoost), dt: dt)
             }
         }
         if tuning.aiSpeedScale > 0 {
@@ -3276,7 +3700,7 @@ struct FootballSimulation {
             // roster here would disturb the taker's aim and the stationary restart ball.
             for _ in 0..<2 {
                 for id in restartOutletIDs {
-                    for other in roster.indices where other != id && !roster[other].isSentOff {
+                    for other in roster.indices where other != id && !roster[other].isUnavailable {
                         let offset = roster[id].state.position - roster[other].state.position
                         let distance = offset.length
                         let spacing = Pitch.playerRadius * 2 + 0.05
@@ -3295,10 +3719,10 @@ struct FootballSimulation {
     private mutating func enforceRestartClearance() {
         guard let context = restartSupportContext else { return }
         var occupied: [Vector2] = []
-        for id in roster.indices where roster[id].team != context.team && !roster[id].isSentOff {
+        for id in roster.indices where roster[id].team != context.team && !roster[id].isUnavailable {
             let target = RestartSupport.legalOpponentTarget(from: roster[id].state.position,
                 team: roster[id].team, restart: context, occupied: occupied,
-                freeKickStandBack: tuning.freeKickStandBack)
+                freeKickStandBack: tuning.freeKickStandBack, ends: ends)
             roster[id].state.position = target
             roster[id].state.velocity = .zero
             occupied.append(target)
@@ -3307,7 +3731,7 @@ struct FootballSimulation {
 
     private mutating func launchRedFreeKick() {
         guard let kicker = possessionID, roster[kicker].team == .red else { return }
-        let goal = Vector2(x: 0, y: -Pitch.length / 2)
+        let goal = ends.direction(for: roster[kicker].team) * (Pitch.length / 2)
         let isShot = (goal - ball.position).length < 27
         var aim = (goal - ball.position).normalized
         activePassTargetID = isShot ? nil : readyRestartOutletID ?? choosePassTarget(from: kicker, aim: aim)
@@ -3318,7 +3742,7 @@ struct FootballSimulation {
     }
 
     private mutating func startTackle(id: Int, direction: Vector2, kind: TackleKind) -> Bool {
-        guard !roster[id].isSentOff, !roster[id].isGoalkeeper, (recoveryTimers[id] ?? 0) <= 0 else { return false }
+        guard !roster[id].isUnavailable, !roster[id].isGoalkeeper, (recoveryTimers[id] ?? 0) <= 0 else { return false }
         rearPressure.removeValue(forKey: id)
         let duration = kind == .slide ? tuning.slideDuration : tuning.tackleDuration
         let recovery = kind == .slide ? tuning.slideRecovery : tuning.tackleRecovery
@@ -3333,7 +3757,7 @@ struct FootballSimulation {
     }
 
     private var selectionPinned: Bool {
-        guard !roster[selectedPlayerID].isSentOff else { return false }
+        guard !roster[selectedPlayerID].isUnavailable else { return false }
         if isControllingGoalkeeper { return true }
         return curveRemaining > 0 || chipRemaining > 0 || isTackling
             || isControllingPassReceiver
@@ -3355,6 +3779,12 @@ struct FootballSimulation {
     /// input belongs to the receiver immediately, including the aim held through release.
     /// Only a neutral stick asks the receiver to meet the physical flight line automatically.
     private func receivingMovementIntent() -> Vector2 {
+        if isCrossInFlight, let cross = crossFlight, selectedPlayerID == cross.receiverID,
+           !cross.manualSteering || validMovement.length <= 0.0001 {
+            let target = crossMeeting(for: selectedPlayerID)?.position ?? cross.destination
+            let offset = target - player.position
+            return offset / max(0.75, offset.length)
+        }
         guard isControllingPassReceiver else { return validMovement }
         guard validMovement.length <= 0.0001 else { return validMovement }
         guard (ball.position - player.position).length <= tuning.passAssistRange + 8 else { return .zero }
@@ -3378,10 +3808,21 @@ struct FootballSimulation {
             horizon: horizon, maximumRelativeSpeed: maximumRelativeSpeed)
     }
 
+    private func crossMeeting(for actor: Int) -> ReceiverInterception.Meeting? {
+        let receiver = roster[actor]
+        return ReceiverInterception.meeting(ball: ball, receiver: receiver.state,
+            speed: tuning.playerMaxSpeed * tuning.offBallSpeedBoost * receiver.abilities.speed,
+            acceleration: tuning.playerAcceleration * receiver.abilities.acceleration,
+            deceleration: tuning.playerDeceleration, reach: 0.65, friction: tuning.ballFriction,
+            gravity: tuning.ballGravity, maximumHeight: HeadingMechanics.maximumHeight,
+            horizon: min(2.5, crossFlight?.remaining ?? 0))
+    }
+
     /// Keep a recipient only while a normal run could still meet the real ball. This is
     /// deliberately independent of requested steering: the player remains free to change course.
     private func receiverCanStillMeetPass(_ id: Int) -> Bool {
         guard eligibleReceiver(id), ballIsStillInPlay() else { return false }
+        if isCrossInFlight, crossFlight?.receiverID == id { return crossMeeting(for: id) != nil }
         let state = roster[id].state
         let speed = ball.velocity.length
         let friction = max(0, tuning.ballFriction)
@@ -3399,7 +3840,7 @@ struct FootballSimulation {
     }
 
     private var selectableBluePlayers: [Footballer] {
-        let eligible = roster.filter { $0.team == .blue && !$0.isSentOff && !$0.isGoalkeeper }
+        let eligible = roster.filter { $0.team == .blue && !$0.isUnavailable && !$0.isGoalkeeper }
         let ready = eligible.filter { !$0.isTackling && $0.fallProgress <= 0.001
             && (recoveryTimers[$0.id] ?? 0) <= 0 }
         return ready.isEmpty ? eligible : ready
@@ -3414,7 +3855,7 @@ struct FootballSimulation {
     /// Nearby options are ranked by the run requested by the stick. Short path prediction lets
     /// a defender block a carrier or meet a moving ball, without promoting a remote aligned player.
     private func preferredBlueSelection(manual: Bool = false) -> BlueSelection {
-        if let owner = possessionID, roster[owner].team == .blue, !roster[owner].isSentOff,
+        if let owner = possessionID, roster[owner].team == .blue, !roster[owner].isUnavailable,
            !roster[owner].isGoalkeeper || mode == .match {
             return BlueSelection(id: owner, advantage: .infinity, immediate: true)
         }
@@ -3515,8 +3956,8 @@ struct FootballSimulation {
         guard phase == .playing, mode != .solo else { return }
         let selection = preferredBlueSelection()
         let candidate = selection.id
-        guard !roster[candidate].isSentOff else { return }
-        if roster[selectedPlayerID].isSentOff || (roster[selectedPlayerID].isGoalkeeper && !isControllingGoalkeeper) {
+        guard !roster[candidate].isUnavailable else { return }
+        if roster[selectedPlayerID].isUnavailable || (roster[selectedPlayerID].isGoalkeeper && !isControllingGoalkeeper) {
             selectBlue(candidate)
             return
         }
@@ -3538,7 +3979,7 @@ struct FootballSimulation {
     }
 
     private mutating func selectBlue(_ id: Int) {
-        guard roster[id].team == .blue, !roster[id].isSentOff,
+        guard roster[id].team == .blue, !roster[id].isUnavailable,
               !roster[id].isGoalkeeper || (mode == .match && (possessionID == id || activePassTargetID == id)),
               id != selectedPlayerID else { return }
         rearPressure.removeAll()
@@ -3555,7 +3996,7 @@ struct FootballSimulation {
     }
 
     private func nearestFootballer(team: Team, to target: Vector2) -> Int {
-        roster.filter { $0.team == team && !$0.isSentOff && !$0.isGoalkeeper }.min {
+        roster.filter { $0.team == team && !$0.isUnavailable && !$0.isGoalkeeper }.min {
             let a = ($0.state.position - target).lengthSquared
             let b = ($1.state.position - target).lengthSquared
             return abs(a - b) < 0.000001 ? $0.id < $1.id : a < b
@@ -3568,9 +4009,9 @@ struct FootballSimulation {
         // Untargeted loose balls keep the ordinary chaser; support roles must not
         // prevent the team from pursuing a restart or pass with no named receiver.
         let carrier = possessionID ?? (ball.mode == .pass && activePassTargetID != nil ? lastKickerID : nil)
-        guard let carrier, !roster[carrier].isSentOff else { return }
+        guard let carrier, !roster[carrier].isUnavailable else { return }
         let team = roster[carrier].team
-        let bases = Dictionary(uniqueKeysWithValues: roster.filter { $0.team == team && !$0.isSentOff && !$0.isGoalkeeper }
+        let bases = Dictionary(uniqueKeysWithValues: roster.filter { $0.team == team && !$0.isUnavailable && !$0.isGoalkeeper }
             .map { ($0.id, matchFormationTarget(for: $0.id, inPossession: true)) })
         let released: AttackingSupport.ReleasedPass?
         if possessionID == nil, let receiver = activePassTargetID, roster[receiver].team == team {
@@ -3579,15 +4020,21 @@ struct FootballSimulation {
         } else { released = nil }
         attackingTargets = AttackingSupport.targets(roster: roster, team: team, carrierID: carrier,
             ball: ball, baseTargets: bases, releasedPass: released,
-            offsideLine: OffsideRules.line(team: team, ball: ball.position, roster: roster))
+            offsideLine: OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends), ends: ends)
+        // A wide carrier invites near-post, central and far-post runs before releasing.
+        // After release those runs can cross the old line; Law 11 still uses the kick snapshot.
+        let boxRuns = CrossingMechanics.supportTargets(crosser: roster[carrier], roster: roster,
+            offsideLine: possessionID != nil
+                ? OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends) : nil, ends: ends)
+        for (id, target) in boxRuns where id != activePassTargetID { attackingTargets[id] = target }
     }
 
     private func aiTarget(for id: Int) -> Vector2 {
         let footballer = roster[id]
-        guard !footballer.isSentOff, !footballer.isGoalkeeper else { return footballer.state.position }
+        guard !footballer.isUnavailable, !footballer.isGoalkeeper else { return footballer.state.position }
         if let regroup = keeperRegroupTarget(for: id) { return regroup }
         let team = footballer.team
-        let attack = team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: team)
         let members = roster.filter { $0.team == team && !$0.isGoalkeeper }.map(\.id)
         let slot = members.firstIndex(of: id) ?? 0
         let lane = mode == .match ? (slot.isMultiple(of: 2) ? -13.0 : 13.0)
@@ -3606,6 +4053,8 @@ struct FootballSimulation {
                 let evade = separation.length < 5 ? separation.normalized.x * 5 : 0
                 target = footballer.state.position + Vector2(x: evade - footballer.state.position.x * 0.12, y: attack * 14)
             }
+        } else if isCrossInFlight, crossFlight?.receiverID == id {
+            target = crossMeeting(for: id)?.position ?? crossFlight!.destination
         } else if activePassTargetID == id, let landing = throughBallLandingPoint {
             target = landing
         } else if activePassTargetID == id {
@@ -3622,7 +4071,7 @@ struct FootballSimulation {
             // The passer moves into a short return lane rather than chasing their own pass.
             target = anchor + Vector2(x: side * (offeringReturn ? 8 : 11), y: attack * (offeringReturn ? 5 : 8))
         } else if nearestFootballer(team: team, to: ball.position) == id {
-            target = ball.position + ball.velocity * 0.16
+            target = ball.position + ball.velocity * (team == .red ? tuning.difficulty.anticipation : 0.16)
         } else {
             target = mode == .match ? matchFormationTarget(for: id, inPossession: false)
                 : Vector2(x: lane + ball.position.x * 0.2, y: ball.position.y - attack * (id % 2 == 0 ? 13 : 21))
@@ -3639,7 +4088,7 @@ struct FootballSimulation {
         guard let owner = possessionID, keeperHandsID != owner,
               !(runningWinProtection > 0 && runningWinOwnerID == owner) else { return }
         for id in roster.indices where id != selectedPlayerID && roster[id].team != roster[owner].team
-            && !roster[id].isSentOff && !roster[id].isGoalkeeper {
+            && !roster[id].isUnavailable && !roster[id].isGoalkeeper {
             let offset = ball.position - roster[id].state.position
             if offset.length <= tuning.tackleReach * roster[id].abilities.defending,
                offset.normalized.dot(roster[id].state.facing) >= 0.45,
@@ -3651,15 +4100,25 @@ struct FootballSimulation {
     }
 
     private mutating func performAIBallAction() {
-        guard let owner = possessionID, !roster[owner].isSentOff, keeperHandsID != owner, roster[owner].team == .red,
+        guard let owner = possessionID, !roster[owner].isUnavailable, keeperHandsID != owner, roster[owner].team == .red,
               ball.height <= tuning.airborneContactHeight, aiDecisionCountdown <= 0,
               (ball.position - roster[owner].state.position).length <= tuning.kickReach else { return }
         guard !penaliseOffsideInvolvement(by: owner) else { return }
         let state = roster[owner].state
-        let goal = Vector2(x: 0, y: -Pitch.length / 2)
+        let goal = ends.direction(for: roster[owner].team) * (Pitch.length / 2)
         let distanceToGoal = (goal - ball.position).length
         let opponent = nearestFootballer(team: .blue, to: state.position)
-        let underPressure = (roster[opponent].state.position - state.position).length < 5
+        let underPressure = (roster[opponent].state.position - state.position).length < (tuning.difficulty == .hard ? 8 : 5)
+        let smartTarget = intelligentOpponentPassTarget(from: owner)
+        if crossingOpportunity(for: owner) != nil,
+           let plan = CrossingMechanics.plan(origin: ball.position, crosser: roster[owner], roster: roster,
+                heldFor: tuning.holdThreshold + tuning.fullChargeDuration * (0.62 + nextRandomUnit() * 0.3),
+                tuning: tuning, ends: ends, sequence: abilityKickSequence,
+                excludedReceiverIDs: crossingExclusions(for: owner)) {
+            launchCross(by: owner, plan: plan, human: false)
+            aiDecisionCountdown = 1
+            return
+        }
         var direction: Vector2
         var speed: Double
         if distanceToGoal < 24 {
@@ -3667,7 +4126,8 @@ struct FootballSimulation {
             speed = tuning.shotMinSpeed + (tuning.shotMaxSpeed - tuning.shotMinSpeed) * 0.45
             ball.mode = .shot
             activePassTargetID = nil
-        } else if underPressure || roster[owner].isGoalkeeper, let target = choosePassTarget(from: owner, aim: -.up) {
+        } else if underPressure || roster[owner].isGoalkeeper || (tuning.difficulty == .hard && smartTarget != nil),
+                  let target = smartTarget {
             direction = ledPassDirection(to: target, from: owner)
             speed = assistedPassSpeed(to: target, from: owner)
             ball.mode = .pass
@@ -3675,6 +4135,9 @@ struct FootballSimulation {
         } else {
             aiDecisionCountdown = 0.35
             return
+        }
+        if tuning.difficulty.kickError > 0 {
+            direction = direction.rotated(by: (nextRandomUnit() * 2 - 1) * tuning.difficulty.kickError)
         }
         recordBallTouch(by: owner, deliberate: true)
         ball.velocity = ratedKickVelocity(by: owner, aim: direction,

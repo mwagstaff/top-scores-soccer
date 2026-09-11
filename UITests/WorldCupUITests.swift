@@ -26,11 +26,16 @@ final class WorldCupUITests: XCTestCase {
         let action = element("sandbox.action", in: app)
         XCTAssertTrue(action.waitForExistence(timeout: 10))
         action.tap()
+        let secondHalf = element("match.second-half", in: app)
+        XCTAssertTrue(secondHalf.waitForExistence(timeout: 10))
+        secondHalf.tap()
         let extraTime = element("worldcup.extra-time", in: app)
         XCTAssertTrue(extraTime.waitForExistence(timeout: 12))
         extraTime.tap()
         XCTAssertTrue(action.waitForExistence(timeout: 5))
         action.tap()
+        XCTAssertTrue(secondHalf.waitForExistence(timeout: 10))
+        secondHalf.tap()
         XCTAssertTrue(element("worldcup.penalty-shootout", in: app).waitForExistence(timeout: 10))
     }
 

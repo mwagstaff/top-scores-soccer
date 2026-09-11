@@ -33,6 +33,21 @@ struct PlayerState: Sendable {
 enum ExerciseMode: String, CaseIterable, Sendable { case solo, passing, match }
 enum Team: String, Sendable { case blue, red }
 
+/// Physical ends are separate from team identity and the scoreboard.
+struct MatchEnds: Equatable, Sendable {
+    var blueAttacksNorth = true
+
+    func attackSign(for team: Team) -> Double {
+        (team == .blue ? 1.0 : -1.0) * (blueAttacksNorth ? 1.0 : -1.0)
+    }
+
+    func direction(for team: Team) -> Vector2 { .up * attackSign(for: team) }
+
+    func attackingTeam(atNorthGoal north: Bool) -> Team {
+        north == blueAttacksNorth ? .blue : .red
+    }
+}
+
 struct Footballer: Identifiable, Sendable {
     let id: Int
     let team: Team
@@ -40,6 +55,8 @@ struct Footballer: Identifiable, Sendable {
     var isTackling = false
     var isSliding = false
     var isSentOff = false
+    var isInjured = false
+    var isUnavailable: Bool { isSentOff || isInjured }
     var yellowCards = 0
     var isGoalkeeper = false
     var goalkeeperDiveProgress = 0.0
@@ -92,7 +109,7 @@ struct ArcadePlayerAbilities: Equatable, Sendable {
 }
 
 enum BallMode: String, Sendable { case free, controlled, pass, shot }
-enum KickPowerKind: String, Sendable { case shot, throwIn, keeperDistribution, longKick }
+enum KickPowerKind: String, Sendable { case shot, cross, throwIn, keeperDistribution, longKick }
 struct BallState: Sendable {
     var position = Vector2(x: 0, y: -0.75)
     var velocity = Vector2.zero
@@ -125,6 +142,7 @@ enum SandboxPhase: Equatable, Sendable {
     case outOfPlay
     case restart(kind: MatchRestartKind, team: Team)
     case fullTime
+    case halfTime
     case foulContact(team: Team)
     case freeKick(team: Team)
     case practiceEnded(losingTeam: Team)

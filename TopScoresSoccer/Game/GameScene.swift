@@ -13,6 +13,7 @@ struct KickPowerFeedback: Equatable {
     var title: String {
         switch kind {
         case .shot: overcharging ? "OVERHIT" : isSweet ? "RELEASE NOW" : aboveSweet ? "HIGH POWER" : "SHOT POWER"
+        case .cross: overcharging ? "CROSS OVERHIT" : isSweet ? "CROSS NOW" : aboveSweet ? "CROSS TOO STRONG" : "CROSS POWER"
         case .throwIn: "THROW DISTANCE"
         case .keeperDistribution: "LONG THROW"
         case .longKick: "HOLD FOR HEIGHT"
@@ -23,6 +24,10 @@ struct KickPowerFeedback: Equatable {
         case .shot: overcharging ? "Too much lift · The shot can sail over"
             : isSweet ? "Release in green for a strong shot"
             : aboveSweet ? "Release soon · More hold adds lift" : "Aim for the green band · Release to shoot"
+        case .cross: overcharging ? "Too much power · The cross can sail past your runners"
+            : isSweet ? "Release in green · Cross towards your runners"
+            : aboveSweet ? "Release soon · The cross may go too far"
+            : "Hold to green · Too little power falls short"
         case .throwIn: "Hold longer to throw farther · Release to throw"
         case .keeperDistribution: "Hold for a high, long throw · Release to throw"
         case .longKick: "Hold longer to send it high and long · Release to clear"
@@ -30,6 +35,15 @@ struct KickPowerFeedback: Equatable {
     }
     var accessibilityValue: String {
         "\(Int((fraction * 100).rounded())) percent. \(guidance)"
+    }
+
+    /// One palette for the meter and its heading, with text conveying the same
+    /// state so a well-timed release never depends on distinguishing colours.
+    var tint: SKColor {
+        overcharging ? SKColor(red: 1, green: 0.36, blue: 0.30, alpha: 1)
+            : isSweet ? SKColor(red: 0.47, green: 0.96, blue: 0.44, alpha: 1)
+            : aboveSweet ? SKColor(red: 1, green: 0.78, blue: 0.30, alpha: 1)
+            : SKColor(red: 0.48, green: 0.86, blue: 1, alpha: 1)
     }
 }
 
@@ -43,6 +57,7 @@ struct SandboxHUD: Equatable {
     var selectedPlayerRating: Int?
     var northGoals = 0
     var southGoals = 0
+    var attacksTopGoal = true
     var status = "BALL AT FEET"
     var detail = "Tap to pass into space · Hold for power"
     var fps = 60
@@ -61,6 +76,7 @@ struct SandboxHUD: Equatable {
     var switches = 0
     var ballHeight = 0.0
     var headers = 0
+    var crosses = 0
     var chipWindow = 0.0
     var queuedAction: String?
     var slides = 0
@@ -70,6 +86,14 @@ struct SandboxHUD: Equatable {
     var redPlayers = 3
     var phase: SandboxPhase = .playing
     var matchTimeRemaining: Double?
+    var matchHalf = 1
+    var stoppageTime = 0.0
+    var isInStoppageTime = false
+    var substitutionNotice: String?
+    var injuredPlayer: ClubPlayer?
+    var pendingInjuryID: Int?
+    var injuryReplacements: [ClubPlayer] = []
+    var periodLabel: String { matchHalf == 1 ? "1st half" : "2nd half" }
 
     var scoreboardHomeName: String { userIsAway ? awayName : homeName }
     var scoreboardAwayName: String { userIsAway ? homeName : awayName }
@@ -82,7 +106,8 @@ struct SandboxHUD: Equatable {
 
     var clockText: String {
         let seconds = Int(ceil(max(0, matchTimeRemaining ?? 0)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+        let clock = String(format: "%d:%02d", seconds / 60, seconds % 60)
+        return isInStoppageTime && stoppageTime > 0.01 && phase != .fullTime && phase != .halfTime ? "+\(Int(ceil(stoppageTime)))s · \(clock)" : clock
     }
 
     var matchResult: String {
@@ -144,8 +169,10 @@ final class GameScene: SKScene {
     private var previousBall = BallState()
     private let fixedStep = 1.0 / 60.0
 
-    init(mode: ExerciseMode = .passing, configuration: FriendlyMatchConfiguration? = nil, userIsAway: Bool = false) {
-        simulation = FootballSimulation(mode: mode, configuration: configuration)
+    init(mode: ExerciseMode = .passing, configuration: FriendlyMatchConfiguration? = nil, userIsAway: Bool = false,
+         injurySeed: UInt64 = 0xA17E_932D, chooseStartingEnds: @escaping () -> Bool = { true }) {
+        simulation = FootballSimulation(mode: mode, configuration: configuration, injurySeed: injurySeed,
+                                        chooseStartingEnds: chooseStartingEnds)
         self.userIsAway = userIsAway && simulation.configuration != nil
         clubKits = simulation.configuration.map { MatchKits.resolveForPlay(configuration: $0, userIsAway: userIsAway) }
         super.init(size: CGSize(width: 440, height: 956))
@@ -197,7 +224,9 @@ final class GameScene: SKScene {
         guard !gameplayPaused, simulation.phase == .playing else { return }
         heldActionStartedAt = startedAt
         if hapticsEnabled { haptics.prepare() }
+        let before = ImpactSnapshot(simulation)
         simulation.pressAction(timestamp: startedAt)
+        playImpacts(since: before)
         updateControlFeedback()
         refreshHUD()
     }
@@ -304,7 +333,7 @@ final class GameScene: SKScene {
             accumulator -= fixedStep
             steps += 1
             if simulation.phase != lastPhase {
-                if simulation.phase == .fullTime {
+                if simulation.phase == .fullTime || simulation.phase == .halfTime {
                     onWhistle?()
                     if soundEnabled, view != nil { whistle.play() }
                 }
@@ -520,8 +549,8 @@ final class GameScene: SKScene {
         let fraction = raw.isFinite ? min(1, max(0, raw)) : 0
         return KickPowerFeedback(kind: kind, fraction: fraction,
                                  sweetSpot: simulation.powerMeterSweetSpot,
-                                 overhitStart: kind == .shot ? KickMechanics.shotOverhitStart(tuning: simulation.tuning) : nil,
-                                 overcharging: simulation.isOverchargingShot)
+                                 overhitStart: simulation.powerMeterOverhitStart,
+                                 overcharging: simulation.isOverchargingPower)
     }
 
     private func updateControlFeedback() {
@@ -547,9 +576,17 @@ final class GameScene: SKScene {
         func sideName(_ team: Team) -> String { team == .blue ? hud.homeName : hud.awayName }
         hud.northGoals = simulation.northGoals
         hud.southGoals = simulation.southGoals
+        hud.attacksTopGoal = simulation.ends.blueAttacksNorth
         hud.phase = simulation.phase
         hud.power = powerFeedback
-        hud.matchTimeRemaining = simulation.mode == .match ? simulation.matchTimeRemaining : nil
+        hud.matchTimeRemaining = simulation.mode == .match ? simulation.periodTimeRemaining : nil
+        hud.matchHalf = simulation.matchHalf
+        hud.stoppageTime = simulation.stoppageTime
+        hud.isInStoppageTime = simulation.isInStoppageTime
+        hud.substitutionNotice = simulation.substitutionNotice
+        hud.pendingInjuryID = simulation.pendingInjuryID
+        hud.injuredPlayer = simulation.pendingInjuryID.flatMap { simulation.roster[$0].clubPlayer }
+        hud.injuryReplacements = simulation.injuryReplacements
         hud.selectedPlayerID = simulation.selectedPlayerID
         hud.passTargetID = simulation.passTargetID
         hud.possession = simulation.possessionTeam.map(sideName) ?? "Loose"
@@ -557,12 +594,13 @@ final class GameScene: SKScene {
         hud.switches = simulation.switchCount
         hud.ballHeight = simulation.ball.height
         hud.headers = simulation.headerCount
+        hud.crosses = simulation.crossCount
         hud.chipWindow = simulation.chipWindowRemaining
         hud.queuedAction = simulation.queuedActionKind
         hud.slides = simulation.slideCount
         hud.fouls = simulation.foulCount
-        hud.bluePlayers = simulation.footballers.filter { $0.team == .blue && !$0.isSentOff }.count
-        hud.redPlayers = simulation.footballers.filter { $0.team == .red && !$0.isSentOff }.count
+        hud.bluePlayers = simulation.footballers.filter { $0.team == .blue && !$0.isUnavailable }.count
+        hud.redPlayers = simulation.footballers.filter { $0.team == .red && !$0.isUnavailable }.count
         if gameplayPaused {
             hud.status = "PAUSED"
             hud.detail = simulation.mode == .match ? "The match clock is paused." : "Take a breather. Your practice is waiting."
@@ -582,6 +620,9 @@ final class GameScene: SKScene {
                     hud.status = "\(sideName(team).uppercased()) \(kind.title.uppercased())"
                     hud.detail = "Taking positions · Clock paused"
                 }
+            case .halfTime:
+                hud.status = "HALF TIME"
+                hud.detail = "Teams swap ends · You will attack the \(hud.attacksTopGoal ? "bottom" : "top") goal"
             case .fullTime:
                 hud.status = "FULL TIME"
                 hud.detail = hud.matchResult
@@ -646,6 +687,9 @@ final class GameScene: SKScene {
                     case .corner, .kickoff:
                         hud.detail = automatic ? "Getting the ball back into play · Clock paused"
                             : "Move the stick to aim · Tap to take it"
+                        if restart.kind == .kickoff {
+                            hud.detail += " · You attack the \(hud.attacksTopGoal ? "top" : "bottom") goal"
+                        }
                     }
                 } else if let keeperTeam = simulation.goalkeeperPossessionTeam {
                     hud.status = "\(sideName(keeperTeam).uppercased()) KEEPER HAS IT"
@@ -666,13 +710,23 @@ final class GameScene: SKScene {
                         : "Keeper is vulnerable · Tap to pass or hold to kick"
                 } else if let queued = simulation.queuedActionKind {
                     hud.status = queued == "header" ? "HEADER QUEUED" : queued == "shot" ? "POWER KICK QUEUED" : "NEXT TOUCH QUEUED"
-                    hud.detail = queued == "header" ? "Aim saved · Move under the ball to meet it" : "Aim saved · Meet the ball to play it first time"
+                    hud.detail = queued == "header"
+                        ? (simulation.isCrossInFlight && simulation.lastTouchTeam == .blue
+                           ? "Meet the cross · Header aims towards goal" : "Aim saved · Move under the ball to meet it")
+                        : "Aim saved · Meet the ball to play it first time"
                 } else if simulation.isPreparingHeader {
                     hud.status = "PREPARE HEADER"
-                    hud.detail = "Aim the stick · Release ACTION to meet the ball"
+                    hud.detail = simulation.isCrossInFlight && simulation.lastTouchTeam == .blue
+                        ? "Jump timed · Move to meet the cross"
+                        : "Aim the stick · Release ACTION to meet the ball"
                 } else if simulation.headingPlayerID != nil {
                     hud.status = "HEAD IT"
-                    hud.detail = "Aim the stick · Tap ACTION as the ball reaches you"
+                    hud.detail = simulation.isCrossInFlight && simulation.lastTouchTeam == .blue
+                        ? "Tap as the cross arrives · Header aims towards goal"
+                        : "Aim the stick · Tap ACTION as the ball reaches you"
+                } else if simulation.isCrossInFlight && simulation.lastTouchTeam == .blue {
+                    hud.status = "MEET THE CROSS"
+                    hud.detail = "Runners attack the box · Tap as the ball reaches you"
                 } else if simulation.isSliding {
                     hud.status = "SLIDING"
                     hud.detail = "Committed to the challenge · Ball first"
@@ -699,6 +753,9 @@ final class GameScene: SKScene {
                 } else if simulation.ball.height > 0.2 {
                     hud.status = "BALL IN THE AIR"
                     hud.detail = "Watch the shadow for the landing spot"
+                } else if simulation.canCross {
+                    hud.status = "CROSS AVAILABLE"
+                    hud.detail = "Hold ACTION · Release in green to find your runners"
                 } else if simulation.actionStatus == .charging {
                     hud.status = "CHARGING"
                     hud.detail = "Aim towards goal to shoot · Release to strike"
@@ -713,6 +770,8 @@ final class GameScene: SKScene {
                     if let target = simulation.passTargetID {
                         let number = simulation.roster[target].clubPlayer?.jerseyNumber ?? target + 1
                         hud.detail = "Tap to pass to #\(number) · Hold for power"
+                    } else if simulation.quickTapWillShoot {
+                        hud.detail = "Tap to shoot · Hold for power"
                     } else {
                         hud.detail = "Tap into space · Hold for power"
                     }

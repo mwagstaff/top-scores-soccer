@@ -184,6 +184,12 @@ final class ClubMatchTests: XCTestCase {
         var simulation = FootballSimulation(configuration: configuration(formation: .fourThreeThree))
         var ticks = 0
         while simulation.phase != .fullTime && ticks < 40_000 {
+            if simulation.phase == .halfTime { simulation.resumeAfterHalfTime() }
+            if simulation.pendingInjuryID != nil {
+                if let replacement = simulation.injuryReplacements.first {
+                    simulation.substituteInjuredPlayer(with: replacement.id)
+                } else { simulation.continueWithoutInjuryReplacement() }
+            }
             if simulation.phase == .playing {
                 if simulation.hasControl {
                     simulation.movement = (Vector2(x: 0, y: Pitch.length / 2) - simulation.ball.position).normalized

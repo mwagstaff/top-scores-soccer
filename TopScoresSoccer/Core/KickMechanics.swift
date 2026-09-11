@@ -72,7 +72,7 @@ enum KickMechanics {
     }
 
     static func shot(origin: Vector2, aim: Vector2, team: Team, heldFor: Double,
-                     tuning: GameplayTuning) -> Shot? {
+                     tuning: GameplayTuning, ends: MatchEnds = MatchEnds()) -> Shot? {
         guard origin.x.isFinite, origin.y.isFinite, aim.x.isFinite, aim.y.isFinite,
               heldFor.isFinite, heldFor >= 0,
               abs(origin.x) <= Pitch.width / 2 + Pitch.ballRadius,
@@ -80,7 +80,7 @@ enum KickMechanics {
         let length = hypot(aim.x, aim.y)
         guard length.isFinite, length > 0.000001 else { return nil }
         let requested = aim / length
-        let attack = team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: team)
         let goalY = Pitch.length / 2 * attack
         let toGoal = Vector2(x: -origin.x, y: goalY - origin.y)
         let goalDistance = toGoal.length

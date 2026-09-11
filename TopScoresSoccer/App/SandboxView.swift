@@ -54,6 +54,11 @@ struct SandboxView: View {
                             .foregroundStyle(lime)
                             .accessibilityIdentifier("sandbox.status")
                     }
+                    if let notice = session.hud.substitutionNotice {
+                        Text(notice).font(.footnote).foregroundStyle(.yellow)
+                            .multilineTextAlignment(.center)
+                            .accessibilityIdentifier("match.substitution-notice")
+                    }
                     Text(session.hud.detail)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.white.opacity(0.8))
@@ -99,6 +104,24 @@ struct SandboxView: View {
                 .background(Color(red: 0.04, green: 0.12, blue: 0.12).opacity(0.96),
                             in: RoundedRectangle(cornerRadius: 24))
             }
+            if session.hud.phase == .halfTime && !session.showingSettings && !session.showingHelp {
+                Color.black.opacity(0.55).ignoresSafeArea().accessibilityHidden(true)
+                VStack(spacing: 18) {
+                    Text("Half-time").font(.title.bold())
+                    Text("\(session.hud.scoreboardHomeName) \(session.hud.scoreboardHomeGoals) – \(session.hud.scoreboardAwayGoals) \(session.hud.scoreboardAwayName)")
+                        .font(.headline).multilineTextAlignment(.center)
+                    Text("Teams swap ends. You will attack the \(session.hud.attacksTopGoal ? "bottom" : "top") goal.")
+                        .font(.subheadline).multilineTextAlignment(.center)
+                        .accessibilityIdentifier("match.half-time-direction")
+                    Button("Start second half") { session.resumeAfterHalfTime() }
+                        .buttonStyle(.borderedProminent).tint(lime).foregroundStyle(.black)
+                        .accessibilityIdentifier("match.second-half")
+                }
+                .padding(24).frame(maxWidth: 390)
+                .foregroundStyle(.white)
+                .background(Color(red: 0.04, green: 0.12, blue: 0.12), in: RoundedRectangle(cornerRadius: 24))
+                .padding(20)
+            }
             if session.penaltyShootout != nil && !session.showingSettings && !session.showingHelp {
                 Color.black.opacity(0.62).ignoresSafeArea().accessibilityHidden(true)
                 penaltyShootoutCard
@@ -112,6 +135,11 @@ struct SandboxView: View {
         .statusBarHidden()
         .sheet(isPresented: $session.showingSettings) { TuningView(session: session) }
         .sheet(isPresented: $session.showingHelp) { helpView }
+        .sheet(isPresented: Binding(
+            get: { session.hud.pendingInjuryID != nil && !session.showingSettings && !session.showingHelp },
+            set: { _ in })) {
+            injuryReplacementView.interactiveDismissDisabled()
+        }
 #if DEBUG
         .sheet(isPresented: $showingWorldCupDebugControls, onDismiss: closeWorldCupDebugControls) {
             worldCupDebugControls
@@ -128,6 +156,41 @@ struct SandboxView: View {
         }
         .onChange(of: scenePhase) { _, phase in session.active = phase == .active }
         .onDisappear { session.active = false }
+    }
+
+    private var injuryReplacementView: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Label("\(session.hud.injuredPlayer?.displayName ?? "Your player") cannot continue", systemImage: "cross.case.fill")
+                        .font(.headline).accessibilityIdentifier("injury.player")
+                    Text("Choose a replacement from your squad. The match is paused while you decide.")
+                        .foregroundStyle(.secondary)
+                }
+                Section("Available replacements") {
+                    ForEach(session.hud.injuryReplacements) { player in
+                        Button {
+                            session.substituteInjuredPlayer(with: player.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(player.name).font(.headline)
+                                Text("\(player.role) · \(player.jerseyNumber.map { "No. \($0) · " } ?? "")Rating \(Int(player.effectiveRating))")
+                                    .font(.subheadline).foregroundStyle(Color.secondary)
+                            }.padding(.vertical, 5)
+                        }
+                        .accessibilityIdentifier("injury.replace.\(player.id)")
+                    }
+                    if session.hud.injuryReplacements.isEmpty {
+                        Text("No eligible squad players remain. Your team will continue with one fewer player.")
+                        Button("Continue match") { session.continueWithoutReplacement() }
+                            .accessibilityIdentifier("injury.continue")
+                    }
+                }
+            }
+            .tint(.blue)
+            .navigationTitle("Injury substitution")
+            .navigationBarTitleDisplayMode(.inline)
+        }
     }
 
     private var topBar: some View {
@@ -164,16 +227,18 @@ struct SandboxView: View {
                             .font(.system(size: 10, weight: .black, design: .monospaced))
                             .foregroundStyle(lime).lineLimit(1).minimumScaleFactor(0.7)
                         if session.mode == .match {
-                            Text(session.hud.clockText)
+                            Text("\(session.hud.matchHalf == 1 ? "1H" : "2H") · \(session.hud.clockText)")
+                                .fixedSize(horizontal: true, vertical: false)
                                 .font(.system(size: 12, weight: .bold, design: .monospaced))
                                 .foregroundStyle(.white).monospacedDigit()
-                                .accessibilityLabel("Time remaining \(session.hud.clockText)")
+                                .accessibilityLabel("\(session.hud.periodLabel), time remaining \(session.hud.clockText)")
                                 .accessibilityIdentifier("match.clock")
                         }
                     }
-                    Text(session.mode != .solo ? "\(session.hud.scoreboardHomeAbbreviation) \(session.hud.scoreboardHomePlayers) · \(session.hud.scoreboardAwayAbbreviation) \(session.hud.scoreboardAwayPlayers)\(session.isCareerMatch ? " · YOU: \(session.hud.homeAbbreviation)" : "")  ↑" : "FIND YOUR TOUCH")
+                    Text(session.mode != .solo ? "\(session.hud.scoreboardHomeAbbreviation) \(session.hud.scoreboardHomePlayers) · \(session.hud.scoreboardAwayAbbreviation) \(session.hud.scoreboardAwayPlayers)\(session.isCareerMatch ? " · YOU: \(session.hud.homeAbbreviation)" : "")  \(session.hud.attacksTopGoal ? "↑" : "↓")" : "FIND YOUR TOUCH")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.6))
+                        .accessibilityIdentifier("match.team-counts")
                 }
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("sandbox.mode")
@@ -514,6 +579,7 @@ struct SandboxView: View {
         "Kick ready: \(session.hud.canKick ? "yes" : "no")\n" +
         "Possession: \(session.hud.possession)  Target: \(session.hud.passTargetID.map { String($0 + 1) } ?? "space")\n" +
         "Tackles: \(session.hud.tackles)  Slides: \(session.hud.slides)  Headers: \(session.hud.headers)\n" +
+        "Crosses: \(session.hud.crosses)\n" +
         String(format: "Height %.2fm  Chip %.2fs\n", session.hud.ballHeight, session.hud.chipWindow) +
         "Queue: \(session.hud.queuedAction ?? "none")  Fouls: \(session.hud.fouls)\n" +
         "Switches: \(session.hud.switches)"
@@ -524,19 +590,21 @@ struct SandboxView: View {
             List {
                 Section("One stick. One button.") {
                     Label("Touch anywhere on the left side of the pitch, then drag to run and aim. Lift and touch again to place the joystick under your thumb.", systemImage: "hand.draw")
-                    Label("Aim towards a teammate and watch for the cyan brackets, then tap ACTION to pass. Aim into open space for a runner to chase; if nobody can reach that space, a tap knocks the ball ahead. Hold ACTION for a powerful kick.", systemImage: "arrow.up.right")
+                    Label("Aim towards a teammate and watch for the cyan brackets, then tap ACTION to pass. Near goal, a goalward tap shoots if there is no nearby pass. Elsewhere, aim into space for a runner to chase, or knock the ball ahead. Hold ACTION for a powerful kick.", systemImage: "arrow.up.right")
                     Label("Hold ACTION, then release to send a high, long ball out of defence, including straight upfield. Hold longer for more height and distance. Near goal, aim towards the net for a shot: release in the green band for a strong finish. The red overhit region can send it over the bar.", systemImage: "scope")
-                    Label("When HEAD appears near a reachable high ball, aim the joystick and tap ACTION to head in that direction. Move under the ball to meet it; a slightly early tap prepares the header until it arrives.", systemImage: "soccerball")
+                    Label("When CROSS appears on the attacking wing, keep running and hold ACTION. Release in green to cross towards your runners in the box. A weak cross falls short; an overhit cross can sail past them. You do not need to turn the joystick towards the box.", systemImage: "arrow.turn.up.left")
+                    Label("Your attackers run to meet a cross. Tap ACTION as it reaches one to head towards goal automatically. Close contact and good timing improve the finish. For other aerial balls, aim the joystick and tap when HEAD appears.", systemImage: "soccerball")
                     Label("For a moment after shooting, steer sideways to bend the ball. Your player coasts, then movement resumes.", systemImage: "arrow.turn.up.right")
                     Label("Quickly pull the stick opposite your kick to chip the ball. The timing window is short; watch the ground shadow as it drops.", systemImage: "arrow.up.forward")
                 }
                 Section(session.isClubMatch ? "Three-minute 11v11" : "Three-minute 5v5") {
+                    Text("A coin toss decides your starting direction. Teams swap ends at half time. The kickoff message shows which goal you attack.")
                     Text(session.isClubMatch
-                         ? "Ten outfield players and a goalkeeper play for each club. You control \(session.hud.homeName), attacking the top goal. Teammates keep your selected formation and offer passing options. Player ratings affect pace, touch, passing, shooting and defending."
-                         : "Four outfield players and a goalkeeper play for each side. Blue attacks the north goal. Outfield teammates keep a 2–2 shape, with a player closing down the ball and others covering or offering passes.")
+                         ? "Ten outfield players and a goalkeeper play for each club. You control \(session.hud.homeName), attacking the \(session.hud.attacksTopGoal ? "top" : "bottom") goal. Teammates keep your selected formation and offer passing options. Player ratings affect pace, touch, passing, crossing, shooting, heading and defending."
+                         : "Four outfield players and a goalkeeper play for each side. Blue attacks the \(session.hud.attacksTopGoal ? "top" : "bottom") goal. Outfield teammates keep a 2–2 shape, with a player closing down the ball and others covering or offering passes.")
                     Text(session.isCareerMatch
-                         ? "The clock counts three minutes of active play and pauses for restarts, fouls, settings or a break. At full time, your result and the other matches in this matchweek save automatically. Tap Continue season to see the table. Leaving an unfinished match keeps the fixture unplayed."
-                         : "The clock counts three minutes of active play and pauses for restarts, fouls, settings or a break. At full time, see the result and tap Play again for a fresh match.")
+                         ? "Play two 90-second halves. Time lost to fouls, restarts and injuries appears as added time in each half. Dangerous attacks and attacking set pieces can finish before the whistle. Settings and pauses stop the clock. At full time, your result and the other matches in this matchweek save automatically. Tap Continue season to see the table. Leaving an unfinished match keeps the fixture unplayed."
+                         : "Play two 90-second halves. Time lost to fouls, restarts and injuries appears as added time in each half. Dangerous attacks and attacking set pieces can finish before the whistle. Settings and pauses stop the clock. At full time, see the result and tap Play again for a fresh match.")
                     Text("Keepers have different shirts, gloves and a GK badge. They position themselves, dive and save automatically off the ball. When your keeper has the ball, the bright ring gives you control.")
                     Text("After a goal, both teams return to their own half for the conceding side’s kickoff. The last touch decides who takes a throw-in, corner or goal kick. Aim your restarts with the joystick and use ACTION, including goal kicks. The opposition restarts automatically.")
                 }
@@ -549,8 +617,8 @@ struct SandboxView: View {
                 }
                 Section("Playing as a team") {
                     Text(session.isClubMatch
-                         ? "You control the \(session.hud.homeName) player with the bright ring. Your club attacks the north goal, at the top of the pitch. The opposition attacks south."
-                         : "You control the blue player with the bright ring. Blue attacks the north goal, at the top of the pitch. Red attacks south.")
+                         ? "You control the \(session.hud.homeName) player with the bright ring. Your club attacks the \(session.hud.attacksTopGoal ? "top" : "bottom") goal. Teams swap ends at half time."
+                         : "You control the blue player with the bright ring. Blue attacks the \(session.hud.attacksTopGoal ? "top" : "bottom") goal. Teams swap ends at half time.")
                     Text("Off the ball, move the stick in the direction you want to run. Control automatically goes to a nearby player whose run can reach the ball or close down its carrier. Watch the bright ring; no tap is needed to switch.")
                     Text("Selection considers where the ball and its carrier are heading, so a player in a better position can take priority over the closest player. Clear changes of direction select quickly; a committed challenge or prepared kick stays with its player.")
                     Text("After an assisted pass, the yellow ring pulses around the player you now control. They follow your joystick immediately, even if you keep holding the passing direction. Centre or release the stick to let them meet the incoming ball. You can also prepare their next kick before it arrives.")
@@ -558,7 +626,7 @@ struct SandboxView: View {
                     Text("Players run a little faster without the ball. To win possession, run into the ball from either side or meet the opponent head on. You do not need to press ACTION.")
                     Text("The opponent shields the ball from behind. Stay close and keep pressing to win it, or run around to approach from the side. A short ACTION tap can prepare a kick or reinforce the same automatic player choice.")
                     Text("When defending or chasing a loose ball, hold ACTION briefly to slide along your running direction. Reach farther, but allow time to recover if you miss. An incoming pass instead lets you prepare a kick.")
-                    Text("Ball first is a clean challenge. A late slide shows the collision, fall and ground reaction before the whistle. Players get back up before the restart is placed. Yellow cards and rare reds follow the whistle; two yellows also mean a sending-off.")
+                    Text("Ball first is a clean challenge. A late slide shows the collision, fall and ground reaction before the whistle. Most players get back up before the restart. Occasionally a player is injured and must leave: choose an available squad replacement for your team; the opposition substitutes automatically. Injuries last for this match, including extra time. Yellow cards and rare reds follow the whistle; two yellows also mean a sending-off.")
                     Text("At a free kick, one or two teammates offer a short pass and opponents stand at least ten yards back. Move the joystick to aim, then tap to the highlighted teammate or hold and release for power.")
                     Text("A defending foul inside the penalty area awards a penalty. After the fall, whistle and recovery, take the kick from the penalty spot. Aim at goal and tap to shoot, or hold and release in the green band for more power. The goalkeeper tries to save it and play continues after the kick.")
                     Text("The restart taker must wait for another player to touch the ball before playing it again. Touching it twice gives the opposition an indirect free kick.")
@@ -566,12 +634,13 @@ struct SandboxView: View {
                     Text("For a difficult backheel, move the stick forward during a short ACTION press, then sharply sweep it back just before releasing. Simply aiming backwards remains an ordinary pass. A pull-back after the kick is the separate chip gesture.")
                 }
                 Section("Timing runs and offside") {
+                    Text("Cross from a wide position near the opposition box. Moving too early or too close to the goal line makes the delivery harder. Better midfielders and attackers cross more accurately; better strikers are stronger finishers with their heads. Position and timing still matter.")
                     Text("In matches, time the pass before your runner moves beyond the defensive line. In the opponents’ half, stay level with the second-last defender or behind the ball when a teammate plays it. You can then run beyond the line to receive.")
                     Text("An offside-positioned player who receives or plays that ball gives the opposition an indirect free kick. Being ahead alone does not stop play. The whistle and OFFSIDE message identify the decision; another player must touch the indirect kick before a goal can count.")
                     Text("There is no offside directly from a throw-in, corner or goal kick. Keeper throws during open play still use the offside check. Both teams follow these rules.")
                 }
                 Section("Keep it in play") {
-                    Text("For an aerial ball, watch its shadow and move into position. Aim and tap for a header; keep moving to meet the ball while HEADER QUEUED is shown. The player jumps and you feel a light contact only when the header connects.")
+                    Text("For an aerial ball, watch its shadow and move into position. Tap as a cross arrives to head towards goal; aim the joystick for other headers. A slightly early tap can queue the header briefly, but a tap close to contact gives your best chance. The player jumps and you feel a light contact only when the header connects.")
                     Text("Before an incoming ball reaches your feet, aim the next kick and tap to queue a pass, or hold and release to queue a powerful kick or shot. Your chosen direction and power are saved, so you can keep moving to meet the ball.")
                     Text("A queued pass keeps its chosen teammate and aim while you move to meet the ball. A tap aimed into open space leads a reachable runner, or knocks ahead if nobody can reach it. You must make contact before the queue expires.")
                     Text("Aim your queued pass into the pitch. Near a boundary, the player keeps a rescue touch in play; holding instead commits a slide to reach and clear the ball.")

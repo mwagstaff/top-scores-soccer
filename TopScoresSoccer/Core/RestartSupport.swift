@@ -23,14 +23,14 @@ enum RestartSupport {
 
     static func layout(for restart: MatchRestart?, roster: [Footballer],
                        unavailableIDs: Set<Int> = [], previousOutletIDs: [Int] = [],
-                       freeKickStandBack: Double = freeKickDistance) -> Layout {
+                       freeKickStandBack: Double = freeKickDistance, ends: MatchEnds = MatchEnds()) -> Layout {
         guard let restart, supported(restart.kind), let taker = restart.takerID,
-              roster.contains(where: { $0.id == taker && $0.team == restart.team && !$0.isSentOff }) else {
+              roster.contains(where: { $0.id == taker && $0.team == restart.team && !$0.isUnavailable }) else {
             return Layout()
         }
         let origin = restartOrigin(restart)
         let eligible = roster.filter {
-            $0.team == restart.team && $0.id != taker && !$0.isGoalkeeper && !$0.isSentOff
+            $0.team == restart.team && $0.id != taker && !$0.isGoalkeeper && !$0.isUnavailable
                 && !$0.isTackling && !$0.isSliding && $0.fallProgress <= 0.001
                 && $0.recoveryProgress <= 0.001 && !unavailableIDs.contains($0.id)
         }.sorted {
@@ -40,7 +40,7 @@ enum RestartSupport {
         }
         if restart.kind == .goalKick {
             return goalKickLayout(restart: restart, eligible: eligible, roster: roster,
-                previousOutletIDs: previousOutletIDs, freeKickStandBack: freeKickStandBack)
+                previousOutletIDs: previousOutletIDs, freeKickStandBack: freeKickStandBack, ends: ends)
         }
         var selected: [Footballer] = []
         for id in previousOutletIDs {
@@ -50,8 +50,8 @@ enum RestartSupport {
         selected += eligible.filter { candidate in !selected.contains(where: { $0.id == candidate.id }) }
             .prefix(max(0, 2 - selected.count))
         var result = Layout()
-        let options = outletCandidates(restart: restart)
-        let goal = Vector2(x: 0, y: restart.team == .blue ? Pitch.length / 2 : -Pitch.length / 2)
+        let options = outletCandidates(restart: restart, ends: ends)
+        let goal = Vector2(x: 0, y: Pitch.length / 2 * ends.attackSign(for: restart.team))
         let towardGoal = (goal - origin).normalized
         for player in selected {
             var best: Vector2?
@@ -68,7 +68,7 @@ enum RestartSupport {
                     cost += max(0, offset.dot(towardGoal)) * 2
                     if offset.dot(towardGoal) > 0, abs(offset.dot(towardGoal.perpendicular)) < 2.5 { cost += 30 }
                 }
-                for other in roster where other.id != player.id && other.id != taker && !other.isSentOff {
+                for other in roster where other.id != player.id && other.id != taker && !other.isUnavailable {
                     let clearance = other.team == restart.team ? 2.2 : 3.0
                     cost += pow(max(0, clearance - (other.state.position - target).length), 2) * 4
                 }
@@ -80,9 +80,9 @@ enum RestartSupport {
             }
         }
         var occupied = result.outletIDs.compactMap { result.outletTargets[$0] }
-        for opponent in roster.filter({ $0.team != restart.team && !$0.isSentOff }).sorted(by: { $0.id < $1.id }) {
+        for opponent in roster.filter({ $0.team != restart.team && !$0.isUnavailable }).sorted(by: { $0.id < $1.id }) {
             let target = legalOpponentTarget(from: opponent.state.position, team: opponent.team,
-                restart: restart, occupied: occupied, freeKickStandBack: freeKickStandBack)
+                restart: restart, occupied: occupied, freeKickStandBack: freeKickStandBack, ends: ends)
             result.opponentTargets[opponent.id] = target
             occupied.append(target)
         }
@@ -94,10 +94,10 @@ enum RestartSupport {
     /// applying the usual whole-body pitch inset to it.
     static func legalOpponentTarget(from position: Vector2, team: Team, restart: MatchRestart,
                                     occupied: [Vector2] = [],
-                                    freeKickStandBack: Double = freeKickDistance) -> Vector2 {
+                                    freeKickStandBack: Double = freeKickDistance, ends: MatchEnds = MatchEnds()) -> Vector2 {
         guard supported(restart.kind), team != restart.team else { return bounded(position) }
         func legal(_ point: Vector2) -> Bool {
-            isLegalOpponentPosition(point, team: team, restart: restart, freeKickStandBack: freeKickStandBack)
+            isLegalOpponentPosition(point, team: team, restart: restart, freeKickStandBack: freeKickStandBack, ends: ends)
         }
         func separated(_ point: Vector2) -> Bool {
             occupied.allSatisfy { ($0 - point).length >= bodySpacing - 0.000001 }
@@ -106,7 +106,7 @@ enum RestartSupport {
         let origin = restartOrigin(restart)
         let clearance = requiredDistance(restart.kind, freeKickStandBack: freeKickStandBack)
         let start = bounded(position)
-        let away = (start - origin).length > 0.000001 ? (start - origin).normalized : (team == .blue ? -Vector2.up : .up)
+        let away = (start - origin).length > 0.000001 ? (start - origin).normalized : -ends.direction(for: team)
         var candidates = [start, bounded(origin + away * clearance)]
         // Nearby spacing alternatives stop coincident players being sent to a distant wall.
         for radius in [bodySpacing, bodySpacing * 2, bodySpacing * 3] {
@@ -122,12 +122,12 @@ enum RestartSupport {
             }
         }
         if restart.kind != .throwIn {
-            let ownGoalY = team == .blue ? -Pitch.length / 2 : Pitch.length / 2
+            let ownGoalY = -Pitch.length / 2 * ends.attackSign(for: team)
             let goalHalf = Pitch.goalWidth / 2 - Pitch.playerRadius - Pitch.postRadius
             candidates.append(Vector2(x: min(goalHalf, max(-goalHalf, start.x)), y: ownGoalY))
             for index in -2...2 { candidates.append(Vector2(x: Double(index) * bodySpacing, y: ownGoalY)) }
-            if insideTakingPenaltyArea(origin, team: restart.team) {
-                let attack = restart.team == .blue ? 1.0 : -1.0
+            if insideTakingPenaltyArea(origin, team: restart.team, ends: ends) {
+                let attack = ends.attackSign(for: restart.team)
                 let front = (-Pitch.length / 2 + boxDepth + Pitch.playerRadius + 0.05) * attack
                 let side = boxHalfWidth + Pitch.playerRadius + 0.05
                 candidates.append(bounded(Vector2(x: start.x, y: front)))
@@ -145,17 +145,17 @@ enum RestartSupport {
     }
 
     static func isLegalOpponentPosition(_ position: Vector2, team: Team, restart: MatchRestart,
-                                        freeKickStandBack: Double = freeKickDistance) -> Bool {
+                                        freeKickStandBack: Double = freeKickDistance, ends: MatchEnds = MatchEnds()) -> Bool {
         guard position.x.isFinite, position.y.isFinite else { return false }
         guard supported(restart.kind), team != restart.team else { return true }
-        let goalLine = restart.kind != .throwIn && isOnOwnGoalLine(position, team: team)
+        let goalLine = restart.kind != .throwIn && isOnOwnGoalLine(position, team: team, ends: ends)
         let inset = Pitch.playerRadius
         let inside = abs(position.x) <= Pitch.width / 2 - inset + 0.000001
             && abs(position.y) <= Pitch.length / 2 - inset + 0.000001
         guard inside || goalLine else { return false }
         let origin = restartOrigin(restart)
-        if restart.kind != .throwIn, insideTakingPenaltyArea(origin, team: restart.team),
-           insideTakingPenaltyArea(position, team: restart.team, margin: Pitch.playerRadius) { return false }
+        if restart.kind != .throwIn, insideTakingPenaltyArea(origin, team: restart.team, ends: ends),
+           insideTakingPenaltyArea(position, team: restart.team, margin: Pitch.playerRadius, ends: ends) { return false }
         return goalLine || (position - origin).length >= requiredDistance(restart.kind,
             freeKickStandBack: freeKickStandBack) - 0.000001
     }
@@ -180,20 +180,20 @@ enum RestartSupport {
                 y: min(Pitch.length / 2 - inset, max(-Pitch.length / 2 + inset, point.y.isFinite ? point.y : 0)))
     }
 
-    private static func insideTakingPenaltyArea(_ point: Vector2, team: Team, margin: Double = 0) -> Bool {
-        let depth = team == .blue ? point.y + Pitch.length / 2 : Pitch.length / 2 - point.y
+    private static func insideTakingPenaltyArea(_ point: Vector2, team: Team, margin: Double = 0, ends: MatchEnds = MatchEnds()) -> Bool {
+        let depth = Pitch.length / 2 + point.y * ends.attackSign(for: team)
         return abs(point.x) <= boxHalfWidth + margin && depth <= boxDepth + margin && depth >= -margin
     }
 
-    private static func isOnOwnGoalLine(_ point: Vector2, team: Team) -> Bool {
-        let goalY = team == .blue ? -Pitch.length / 2 : Pitch.length / 2
+    private static func isOnOwnGoalLine(_ point: Vector2, team: Team, ends: MatchEnds = MatchEnds()) -> Bool {
+        let goalY = -Pitch.length / 2 * ends.attackSign(for: team)
         return abs(point.y - goalY) < 0.000001
             && abs(point.x) <= Pitch.goalWidth / 2 - Pitch.playerRadius - Pitch.postRadius
     }
 
-    private static func outletCandidates(restart: MatchRestart) -> [Vector2] {
+    private static func outletCandidates(restart: MatchRestart, ends: MatchEnds = MatchEnds()) -> [Vector2] {
         let origin = restartOrigin(restart)
-        let attack = restart.team == .blue ? 1.0 : -1.0
+        let attack = ends.attackSign(for: restart.team)
         var offsets: [Vector2] = []
         if restart.kind == .throwIn {
             let inward = origin.x < 0 ? 1.0 : -1.0
@@ -223,9 +223,9 @@ enum RestartSupport {
     }
 
     private static func goalKickLayout(restart: MatchRestart, eligible: [Footballer], roster: [Footballer],
-                                       previousOutletIDs: [Int], freeKickStandBack: Double) -> Layout {
+                                       previousOutletIDs: [Int], freeKickStandBack: Double, ends: MatchEnds = MatchEnds()) -> Layout {
         var result = Layout()
-        let target = goalKickShortOption(for: restart)
+        let target = goalKickShortOption(for: restart, ends: ends)
         let teamOutfield = roster.filter { $0.team == restart.team && !$0.isGoalkeeper }
             .sorted { $0.id < $1.id }
         let fallbackDefenderCount = teamOutfield.count >= 8 ? 4 : min(2, teamOutfield.count)
@@ -247,17 +247,17 @@ enum RestartSupport {
             result.outletTargets[preferred.id] = target
         }
         var occupied = preferred == nil ? [] : [target]
-        for opponent in roster.filter({ $0.team != restart.team && !$0.isSentOff }).sorted(by: { $0.id < $1.id }) {
+        for opponent in roster.filter({ $0.team != restart.team && !$0.isUnavailable }).sorted(by: { $0.id < $1.id }) {
             let target = legalOpponentTarget(from: opponent.state.position, team: opponent.team,
-                restart: restart, occupied: occupied, freeKickStandBack: freeKickStandBack)
+                restart: restart, occupied: occupied, freeKickStandBack: freeKickStandBack, ends: ends)
             result.opponentTargets[opponent.id] = target
             occupied.append(target)
         }
         return result
     }
 
-    private static func goalKickShortOption(for restart: MatchRestart) -> Vector2 {
-        let attack = restart.team == .blue ? 1.0 : -1.0
+    private static func goalKickShortOption(for restart: MatchRestart, ends: MatchEnds = MatchEnds()) -> Vector2 {
+        let attack = ends.attackSign(for: restart.team)
         let takingSide = restart.position.x >= 0 ? 1.0 : -1.0
         return Vector2(x: -takingSide * goalAreaHalfWidth,
                        y: (-Pitch.length / 2 + goalAreaDepth) * attack)

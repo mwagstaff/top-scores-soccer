@@ -159,7 +159,7 @@ final class PitchRenderer {
             }
             // Dismissal takes effect in play immediately, but a committed slide
             // remains visible until its foul aftermath and get-up have finished.
-            let dismissed = footballer.isSentOff && !footballer.isSliding
+            let dismissed = footballer.isUnavailable && !footballer.isSliding
             sprite.root.isHidden = dismissed
             sprite.shadow.isHidden = dismissed
             if dismissed { continue }
@@ -334,9 +334,9 @@ final class PitchRenderer {
         passVector.isHidden = !debug || passTargetID == nil
         if debug {
             trajectory.path = line(from: ball.position, to: ball.position + ball.velocity * 0.45)
-            if let player = footballers.first(where: { $0.id == selectedPlayerID && !$0.isSentOff })?.state {
+            if let player = footballers.first(where: { $0.id == selectedPlayerID && !$0.isUnavailable })?.state {
                 playerVector.path = line(from: player.position, to: player.position + player.velocity * 0.6)
-                if let target = footballers.first(where: { $0.id == passTargetID && !$0.isSentOff })?.state {
+                if let target = footballers.first(where: { $0.id == passTargetID && !$0.isUnavailable })?.state {
                     passVector.path = line(from: player.position, to: target.position)
                 } else {
                     passVector.path = nil

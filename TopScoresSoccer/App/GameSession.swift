@@ -25,7 +25,10 @@ final class GameSession {
         didSet { scene.setMode(mode) }
     }
     var tuning = GameplayTuning.defaults {
-        didSet { scene.simulation.tuning = tuning }
+        didSet {
+            scene.simulation.tuning = tuning
+            UserDefaults.standard.set(tuning.difficulty.rawValue, forKey: "gameDifficulty")
+        }
     }
     var debugEnabled = false {
         didSet { scene.debugEnabled = debugEnabled }
@@ -41,6 +44,16 @@ final class GameSession {
     var showingHelp = false { didSet { reconcilePause() } }
     var active = true { didSet { reconcilePause() } }
 
+    private nonisolated static func chooseStartingEnds() -> Bool {
+#if DEBUG
+        // Scripted pitch fixtures need a reproducible toss; ordinary matches always randomise.
+        if ProcessInfo.processInfo.arguments.contains("--uitesting") {
+            return !ProcessInfo.processInfo.arguments.contains("--south-kickoff")
+        }
+#endif
+        return Bool.random()
+    }
+
     init(configuration: FriendlyMatchConfiguration? = nil, startingMode: ExerciseMode? = nil,
          careerContext: CareerMatchContext? = nil, onCareerComplete: ((Int, Int) throws -> Void)? = nil) {
         self.worldCupContext = nil
@@ -50,7 +63,10 @@ final class GameSession {
         self.onCareerComplete = onCareerComplete
         let initialMode: ExerciseMode = configuration == nil ? (startingMode ?? .launchMode) : .match
         mode = initialMode
-        scene = GameScene(mode: initialMode, configuration: configuration, userIsAway: careerContext?.userIsAway ?? false)
+        scene = GameScene(mode: initialMode, configuration: configuration, userIsAway: careerContext?.userIsAway ?? false,
+                          injurySeed: UInt64.random(in: .min ... .max), chooseStartingEnds: Self.chooseStartingEnds)
+        tuning.difficulty = GameDifficulty(rawValue: UserDefaults.standard.string(forKey: "gameDifficulty") ?? "") ?? .medium
+        scene.simulation.tuning = tuning
         scene.onHUDUpdate = { [weak self] snapshot in
             guard let self else { return }
             self.hud = snapshot
@@ -74,7 +90,10 @@ final class GameSession {
         self.onCareerComplete = nil
         self.onWorldCupComplete = onWorldCupComplete
         mode = .match
-        scene = GameScene(mode: .match, configuration: configuration, userIsAway: worldCupContext.userIsAway)
+        scene = GameScene(mode: .match, configuration: configuration, userIsAway: worldCupContext.userIsAway,
+                          injurySeed: UInt64.random(in: .min ... .max), chooseStartingEnds: Self.chooseStartingEnds)
+        tuning.difficulty = GameDifficulty(rawValue: UserDefaults.standard.string(forKey: "gameDifficulty") ?? "") ?? .medium
+        scene.simulation.tuning = tuning
         scene.onHUDUpdate = { [weak self] snapshot in
             guard let self else { return }
             self.hud = snapshot
@@ -95,6 +114,7 @@ final class GameSession {
         guard arguments.contains("--uitesting") else { return }
         #if DEBUG
         if mode == .match, arguments.contains("--penalty") || arguments.contains("--free-kick") {
+            if arguments.contains("--injury") { scene.simulation.tuning.foulInjuryChance = 1 }
             // Enter through a real rear-on challenge, including contact, fall, whistle and cards.
             // This is a live match penalty, separate from the World Cup shootout screen.
             scene.simulation.tuning.aiSpeedScale = 0
@@ -218,6 +238,18 @@ final class GameSession {
     func reset() { guard !isCompetitionMatch else { return }; scene.resetSandbox() }
     func resetScore() { guard !isCompetitionMatch else { return }; scene.resetSandbox(clearScore: true) }
     func restoreDefaults() { tuning = .defaults }
+    func resumeAfterHalfTime() {
+        scene.simulation.resumeAfterHalfTime()
+        scene.refreshHUD()
+    }
+    func substituteInjuredPlayer(with id: String) {
+        scene.simulation.substituteInjuredPlayer(with: id)
+        scene.refreshHUD()
+    }
+    func continueWithoutReplacement() {
+        scene.simulation.continueWithoutInjuryReplacement()
+        scene.refreshHUD()
+    }
     var isClubMatch: Bool { configuration != nil && mode == .match }
     var isCareerMatch: Bool { careerContext != nil && isClubMatch }
     var isWorldCupMatch: Bool { worldCupContext != nil && isClubMatch }
@@ -422,7 +454,7 @@ extension ExerciseMode {
         switch self {
         case .solo: "One player, two empty goals. Practise shooting, chips and first-time touches at your own pace."
         case .passing: "Three blue players against three reds, with empty goals. Practise passing and defending without a match clock."
-        case .match: "Four outfield players and a goalkeeper on each side. Saves are automatic; take control when your keeper has the ball. Three minutes of active play; blue attacks north."
+        case .match: "Four outfield players and a goalkeeper on each side. Saves are automatic; take control when your keeper has the ball. Two 90-second halves with added time; blue attacks north."
         }
     }
 }

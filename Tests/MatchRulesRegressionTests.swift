@@ -241,7 +241,10 @@ final class MatchRulesRegressionTests: XCTestCase {
         simulation.pressAction()
         simulation.releaseAction(heldFor: 0.1)
         simulation.movement = .zero
-        for _ in 0..<80 where simulation.phase != .fullTime { simulation.step(dt: tick) }
+        for _ in 0..<240 where simulation.phase != .fullTime {
+            if simulation.phase == .halfTime { simulation.resumeAfterHalfTime() }
+            simulation.step(dt: tick)
+        }
         XCTAssertEqual(simulation.phase, .fullTime)
         XCTAssertEqual(simulation.matchTimeElapsed, 1)
         XCTAssertEqual(simulation.matchTimeRemaining, 0)

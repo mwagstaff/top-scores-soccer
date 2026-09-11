@@ -162,6 +162,7 @@ final class WorldCupTests: XCTestCase {
         session.scene.simulation.pressAction()
         session.scene.simulation.releaseAction(heldFor: 0.1)
         for _ in 0..<180 where session.scene.simulation.phase != .fullTime {
+            if session.scene.simulation.phase == .halfTime { session.resumeAfterHalfTime() }
             session.scene.simulation.step(dt: 1.0 / 60)
         }
         session.scene.refreshHUD()
@@ -173,6 +174,7 @@ final class WorldCupTests: XCTestCase {
         session.scene.simulation.pressAction()
         session.scene.simulation.releaseAction(heldFor: 0.1)
         for _ in 0..<180 where session.scene.simulation.phase != .fullTime {
+            if session.scene.simulation.phase == .halfTime { session.resumeAfterHalfTime() }
             session.scene.simulation.step(dt: 1.0 / 60)
         }
         session.scene.refreshHUD()

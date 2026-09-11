@@ -12,7 +12,13 @@ final class CareerMatchSessionTests: XCTestCase {
         session.scene.simulation.tuning.matchDuration = 0.5
         session.scene.pressAction()
         session.scene.releaseAction(heldFor: 0.12)
-        for frame in 0..<90 { session.scene.update(Double(frame) / 60) }
+        for frame in 0..<240 {
+            if session.scene.simulation.phase == .halfTime {
+                XCTAssertFalse(session.careerResultSaved)
+                session.resumeAfterHalfTime()
+            }
+            session.scene.update(Double(frame) / 60)
+        }
         session.scene.refreshHUD()
         XCTAssertEqual(session.hud.phase, .fullTime)
     }

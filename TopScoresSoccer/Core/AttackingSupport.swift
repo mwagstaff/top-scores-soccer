@@ -25,18 +25,18 @@ enum AttackingSupport {
     static func targets(roster: [Footballer], team: Team, carrierID: Int?, ball: BallState,
                         baseTargets: [Int: Vector2], releasedPass: ReleasedPass? = nil,
                         offsideLine: Double? = nil,
-                        configuration: Configuration = .defaults) -> [Int: Vector2] {
-        let attack = team == .blue ? 1.0 : -1.0
+                        configuration: Configuration = .defaults, ends: MatchEnds = MatchEnds()) -> [Int: Vector2] {
+        let attack = ends.attackSign(for: team)
         func local(_ point: Vector2) -> Vector2 { point * attack }
         func eligible(_ player: Footballer) -> Bool {
-            player.team == team && !player.isGoalkeeper && !player.isSentOff
+            player.team == team && !player.isGoalkeeper && !player.isUnavailable
                 && !player.isTackling && !player.isSliding
                 && player.fallProgress <= 0.001 && player.recoveryProgress <= 0.001
         }
         let teammates = roster.filter(eligible).sorted { $0.id < $1.id }
         guard !teammates.isEmpty else { return [:] }
-        let opponents = roster.filter { $0.team != team && !$0.isSentOff }.map { local($0.state.position) }
-        let line = offsideLine ?? OffsideRules.line(team: team, ball: ball.position, roster: roster)
+        let opponents = roster.filter { $0.team != team && !$0.isUnavailable }.map { local($0.state.position) }
+        let line = offsideLine ?? OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends)
         let safeProgress = line - max(0, configuration.onsideMargin)
         let inset = min(12, max(Pitch.playerRadius, configuration.pitchInset))
         let width = Pitch.width / 2 - inset

@@ -1,6 +1,190 @@
 import XCTest
 @testable import TopScoresSoccer
 
+final class MatchEndsAndQuickShotTests: XCTestCase {
+    private let tick = 1.0 / 60
+
+    private func liveMatch(north: Bool, secondHalf: Bool = false) -> FootballSimulation {
+        var tuning = GameplayTuning.defaults
+        tuning.aiSpeedScale = 0
+        var match = FootballSimulation(tuning: tuning, mode: .match, chooseStartingEnds: { north })
+        match.pressAction()
+        match.releaseAction(heldFor: 0.12)
+        for _ in 0..<40 { match.step(dt: tick) }
+        if secondHalf {
+            match.tuning.matchDuration = 2
+            for _ in 0..<180 where match.phase != .halfTime { match.step(dt: tick) }
+            XCTAssertEqual(match.phase, .halfTime)
+            match.resumeAfterHalfTime()
+            for _ in 0..<60 where match.isTakingRestart { match.step(dt: tick) }
+            match.tuning.matchDuration = 180
+        }
+        return match
+    }
+
+    private func setUpAttack(_ match: inout FootballSimulation, progress: Double = 38) {
+        match.cancelInput()
+        let attack = match.ends.attackSign(for: .blue)
+        for id in match.roster.indices {
+            match.roster[id].state.position = Vector2(x: 26, y: Double(id) - 10)
+            match.roster[id].state.velocity = .zero
+        }
+        match.player.position = Vector2(x: 0, y: progress * attack)
+        match.player.facing = .up * attack
+        match.ball = BallState(position: match.player.position + .up * (1.2 * attack), mode: .free)
+        match.movement = .up * attack
+    }
+
+    func testQuickTapShootsOnTargetInBothDirectionsAndBothHalves() {
+        for north in [true, false] {
+            for secondHalf in [false, true] {
+                for duration in [0.0, 0.08, 0.24] {
+                    var match = liveMatch(north: north, secondHalf: secondHalf)
+                    setUpAttack(&match)
+                    match.pressAction()
+                    XCTAssertNil(match.passTargetID)
+                    XCTAssertTrue(match.quickTapWillShoot)
+                    match.releaseAction(heldFor: duration)
+                    XCTAssertEqual(match.lastKickKind, "shot")
+                    XCTAssertEqual(match.ball.mode, .shot)
+                    XCTAssertNil(match.passTargetID)
+                    XCTAssertGreaterThan(match.ball.velocity.dot(match.ends.direction(for: .blue)), 20)
+                    for _ in 0..<100 where match.phase == .playing { match.step(dt: tick) }
+                    XCTAssertEqual(match.northGoals, 1, "Blue's score follows the team across ends.")
+                    XCTAssertEqual(match.southGoals, 0)
+                    XCTAssertEqual(match.matchRestart?.team, .red)
+                }
+            }
+        }
+    }
+
+    func testQuickTapPreservesNearbyDeliberatePass() {
+        for north in [true, false] {
+            var match = liveMatch(north: north)
+            setUpAttack(&match)
+            let actor = match.selectedPlayerID
+            let receiver = match.roster.first { $0.team == .blue && $0.id != actor && !$0.isGoalkeeper }!.id
+            let attack = match.ends.attackSign(for: .blue)
+            match.roster[receiver].state.position = match.player.position + Vector2(x: 6, y: 5 * attack)
+            // Keep the receiver onside and clear of defenders.
+            for id in [5, 6, 9] { match.roster[id].state.position = Vector2(x: 25, y: 48 * attack) }
+            match.movement = (match.roster[receiver].state.position - match.player.position).normalized
+            match.pressAction()
+            XCTAssertEqual(match.passTargetID, receiver)
+            match.releaseAction(heldFor: 0.08)
+            XCTAssertEqual(match.lastKickKind, "pass")
+            XCTAssertEqual(match.selectedPlayerID, receiver)
+        }
+    }
+
+    func testMidfieldAndAwayFromGoalTapsDoNotBecomeShots() {
+        for north in [true, false] {
+            for midfield in [true, false] {
+                var match = liveMatch(north: north)
+                setUpAttack(&match, progress: midfield ? 0 : 38)
+                if !midfield { match.movement = -match.ends.direction(for: .blue) }
+                match.pressAction()
+                match.releaseAction(heldFor: 0.08)
+                XCTAssertNotEqual(match.lastKickKind, "shot")
+                XCTAssertNotEqual(match.ball.mode, .shot)
+            }
+        }
+    }
+
+    func testCoinTossIsUsedOnlyForNewMatchesAndHalfTimeSwapsBothTeams() {
+        var tosses = 0
+        var tuning = GameplayTuning.defaults
+        tuning.matchDuration = 2
+        tuning.aiSpeedScale = 0
+        var match = FootballSimulation(tuning: tuning, mode: .match, chooseStartingEnds: {
+            tosses += 1
+            return tosses.isMultiple(of: 2)
+        })
+        XCTAssertFalse(match.ends.blueAttacksNorth)
+        XCTAssertEqual(tosses, 1)
+        for team in [Team.blue, .red] {
+            let keeper = match.roster.first { $0.team == team && $0.isGoalkeeper }!
+            XCTAssertLessThan(keeper.state.position.y * match.ends.attackSign(for: team), -45)
+        }
+        match.pressAction()
+        match.releaseAction(heldFor: 0.08)
+        for _ in 0..<180 where match.phase != .halfTime { match.step(dt: tick) }
+        XCTAssertEqual(match.phase, .halfTime)
+        match.resumeAfterHalfTime()
+        XCTAssertTrue(match.ends.blueAttacksNorth)
+        XCTAssertEqual(tosses, 1)
+        for team in [Team.blue, .red] {
+            let keeper = match.roster.first { $0.team == team && $0.isGoalkeeper }!
+            XCTAssertLessThan(keeper.state.position.y * match.ends.attackSign(for: team), -45)
+        }
+        match.resumeAfterHalfTime()
+        XCTAssertTrue(match.ends.blueAttacksNorth, "A repeated resume must not swap again.")
+        match.startAdditionalPeriod(duration: 60)
+        XCTAssertEqual(tosses, 1, "Extra time belongs to the same match and keeps its coin toss.")
+        XCTAssertFalse(match.ends.blueAttacksNorth)
+        match.reset()
+        XCTAssertEqual(tosses, 2)
+        XCTAssertTrue(match.ends.blueAttacksNorth)
+        XCTAssertEqual(match.matchHalf, 1)
+    }
+
+    func testGoalAtEitherEndCreditsAttackingTeamAndAwardsOtherTeamKickoff() {
+        for north in [true, false] {
+            for goalNorth in [true, false] {
+                var match = liveMatch(north: north)
+                for id in match.roster.indices { match.roster[id].state.position = Vector2(x: 25, y: 0) }
+                let sign = goalNorth ? 1.0 : -1.0
+                match.ball = BallState(position: .up * (52 * sign), velocity: .up * (120 * sign), mode: .shot)
+                match.step(dt: tick)
+                let blueScored = goalNorth == north
+                XCTAssertEqual(match.northGoals, blueScored ? 1 : 0)
+                XCTAssertEqual(match.southGoals, blueScored ? 0 : 1)
+                XCTAssertEqual(match.matchRestart?.team, blueScored ? .red : .blue)
+            }
+        }
+    }
+
+    func testReversedEndsMovePenaltyAndKeeperAreasAndOffsideLine() {
+        let ends = MatchEnds(blueAttacksNorth: false)
+        XCTAssertTrue(PenaltyRules.awardsPenalty(at: Vector2(x: 0, y: -45), offender: .red, awarded: .blue, ends: ends))
+        XCTAssertEqual(PenaltyRules.mark(for: .blue, ends: ends).y, -41.5)
+        var configuration = GoalkeeperAI.Configuration.defaults
+        configuration.ends = ends
+        XCTAssertTrue(GoalkeeperAI.isInOwnBox(Vector2(x: 0, y: 48), team: .blue, configuration: configuration))
+        XCTAssertFalse(GoalkeeperAI.isInOwnBox(Vector2(x: 0, y: -48), team: .blue, configuration: configuration))
+        var match = liveMatch(north: false)
+        for id in match.roster.indices { match.roster[id].state.position = .zero }
+        match.roster[0].state.position = Vector2(x: 0, y: -20)
+        match.roster[1].state.position = Vector2(x: 0, y: -40)
+        match.roster[5].state.position = Vector2(x: 0, y: -30)
+        match.roster[9].state.position = Vector2(x: 0, y: -50)
+        XCTAssertEqual(OffsideRules.snapshot(actor: 0, ball: Vector2(x: 0, y: -21), roster: match.roster, ends: ends)?.candidates, [1])
+    }
+
+    func testEndLineRestartsFollowCurrentDefendingTeam() {
+        for north in [true, false] {
+            for exitNorth in [true, false] {
+                for touchTeam in [Team.blue, .red] {
+                    var match = liveMatch(north: north)
+                    let toucher = touchTeam == .blue ? 0 : 5
+                    match.ball = BallState(position: match.roster[toucher].state.position
+                        + match.ends.direction(for: touchTeam) * 1.2, mode: .free)
+                    match.step(dt: tick)
+                    XCTAssertEqual(match.lastTouchTeam, touchTeam)
+                    for id in match.roster.indices { match.roster[id].state.position = Vector2(x: 25, y: 0) }
+                    let sign = exitNorth ? 1.0 : -1.0
+                    match.ball = BallState(position: Vector2(x: 12, y: 52 * sign), velocity: .up * (120 * sign), mode: .free)
+                    match.step(dt: tick)
+                    let attacker = match.ends.attackingTeam(atNorthGoal: exitNorth)
+                    let defender: Team = attacker == .blue ? .red : .blue
+                    XCTAssertEqual(match.matchRestart?.kind, touchTeam == defender ? .corner : .goalKick)
+                    XCTAssertEqual(match.matchRestart?.team, touchTeam == defender ? attacker : defender)
+                }
+            }
+        }
+    }
+}
+
 final class MatchSimulationTests: XCTestCase {
     private let tick = 1.0 / 60.0
 
@@ -51,6 +235,9 @@ final class MatchSimulationTests: XCTestCase {
         var simulation = liveMatch()
         simulation.tuning.matchDuration = 0.25
         advance(&simulation, frames: 60)
+        XCTAssertEqual(simulation.phase, .halfTime)
+        simulation.resumeAfterHalfTime()
+        advance(&simulation, frames: 120)
         XCTAssertEqual(simulation.phase, .fullTime)
         XCTAssertEqual(simulation.matchTimeElapsed, simulation.matchDuration, accuracy: 0.000001)
         XCTAssertEqual(simulation.matchTimeRemaining, 0)
@@ -324,9 +511,15 @@ final class MatchSimulationTests: XCTestCase {
         var simulation = FootballSimulation(mode: .match)
         var ticks = 0
         while simulation.phase != .fullTime && ticks < 40_000 {
+            if simulation.phase == .halfTime { simulation.resumeAfterHalfTime() }
+            if simulation.pendingInjuryID != nil {
+                if let replacement = simulation.injuryReplacements.first {
+                    simulation.substituteInjuredPlayer(with: replacement.id)
+                } else { simulation.continueWithoutInjuryReplacement() }
+            }
             if simulation.phase == .playing {
                 if simulation.hasControl {
-                    simulation.movement = (Vector2(x: 0, y: Pitch.length / 2) - simulation.ball.position).normalized
+                    simulation.movement = (simulation.ends.direction(for: .blue) * (Pitch.length / 2) - simulation.ball.position).normalized
                     if simulation.isTakingRestart || ticks.isMultiple(of: 35) {
                         simulation.pressAction()
                         simulation.releaseAction(heldFor: simulation.isTakingRestart ? 0.12 : 0.6)

@@ -3,6 +3,7 @@ import SwiftUI
 /// The catalogue is loaded before presenting the match. Lineups are value snapshots,
 /// so a background catalogue refresh cannot change a match already on the pitch.
 struct FriendlySetupView: View {
+    @AppStorage("gameDifficulty") private var difficulty = GameDifficulty.medium.rawValue
     @State private var store: PremierLeagueStore
     @State private var home: ClubLineup?
     @State private var away: ClubLineup?
@@ -28,6 +29,17 @@ struct FriendlySetupView: View {
                     } else {
                         ContentUnavailableView("Clubs unavailable", systemImage: "soccerball",
                                                description: Text("Refresh the squads to choose your clubs."))
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("Difficulty", selection: $difficulty) {
+                            ForEach(GameDifficulty.allCases, id: \.rawValue) { level in
+                                Text(level.title).tag(level.rawValue)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("friendly.difficulty")
+                        Text((GameDifficulty(rawValue: difficulty) ?? .medium).description)
+                            .font(.footnote).foregroundStyle(FriendlyStyle.secondary)
                     }
                     catalogueStatus
                 }

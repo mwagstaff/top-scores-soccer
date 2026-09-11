@@ -138,7 +138,7 @@ final class KeeperDistributionIntegrationTests: XCTestCase {
         for hands in [true, false] {
             var simulation = prepared(hands: hands, distance: 24)
             let opponentY = simulation.ball.position.y + 12
-            simulation.roster[5].state = PlayerState(position: Vector2(x: 0, y: opponentY))
+            simulation.roster[5].state = PlayerState(position: Vector2(x: simulation.ball.position.x, y: opponentY))
             simulation.movement = .up * 0.1
             XCTAssertEqual(simulation.passTargetID, 0)
             simulation.pressAction()

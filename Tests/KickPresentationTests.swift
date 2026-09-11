@@ -121,7 +121,7 @@ final class KickPresentationTests: XCTestCase {
             for goalKick in [false, true] {
                 let scene = matchFixture(throwIn: false, goalKick: goalKick)
                 scene.size = viewport
-                scene.simulation.roster[0].state = PlayerState(position: Vector2(x: -30, y: -20))
+                scene.simulation.roster[0].state = PlayerState(position: Vector2(x: -24, y: -20))
                 scene.simulation.roster[1].state = PlayerState(position: Vector2(x: 30, y: -20))
                 scene.simulation.roster[2].state = PlayerState(position: Vector2(x: -26, y: 39))
                 scene.simulation.roster[3].state = PlayerState(position: Vector2(x: 26, y: 39))

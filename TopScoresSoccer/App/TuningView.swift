@@ -8,7 +8,7 @@ struct TuningView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Play is paused. Changes last for this app session.")
+                    Text("Play is paused. Difficulty is saved for future matches; other tuning lasts for this session.")
                         .font(.subheadline).foregroundStyle(.secondary)
                     if session.configuration == nil {
                         Picker("Play mode", selection: $session.mode) {
@@ -20,9 +20,19 @@ struct TuningView: View {
                         Text(session.mode.description)
                             .font(.footnote).foregroundStyle(.secondary)
                     } else {
-                        Text(session.isCareerMatch ? "Premier League career · Three minutes of active play" : "11v11 friendly · Three minutes of active play")
+                        Text("\(session.modeTitle) · Two halves with added time")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
+                }
+                Section("Difficulty") {
+                    Picker("Opposition", selection: $session.tuning.difficulty) {
+                        ForEach(GameDifficulty.allCases, id: \.self) { difficulty in
+                            Text(difficulty.title).tag(difficulty)
+                        }
+                    }
+                    .accessibilityIdentifier("settings.difficulty")
+                    Text(session.tuning.difficulty.description)
+                        .font(.footnote).foregroundStyle(.secondary)
                 }
                 Section("Movement") {
                     tuningSlider("Running speed", key: \.playerMaxSpeed, range: 6...15, unit: "m/s")
@@ -78,7 +88,7 @@ struct TuningView: View {
                 Section("Sound and haptics") {
                     Toggle("Referee whistle", isOn: $session.soundEnabled)
                         .accessibilityIdentifier("settings.sound")
-                    Text("Plays for fouls, offside and full time. Respects Silent Mode.")
+                    Text("Plays for fouls, offside, half-time and full-time. Respects Silent Mode.")
                         .font(.footnote).foregroundStyle(.secondary)
                     Toggle("Gameplay haptics", isOn: $session.hapticsEnabled)
                         .accessibilityIdentifier("settings.haptics")

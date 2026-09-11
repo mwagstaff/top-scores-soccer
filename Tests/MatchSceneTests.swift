@@ -20,7 +20,7 @@ final class MatchSceneTests: XCTestCase {
         XCTAssertEqual(scene.simulation.player.position, spot)
         XCTAssertLessThan(scene.simulation.player.facing.x, -0.9)
         XCTAssertEqual(hud.status, "BLUE KICKOFF")
-        XCTAssertEqual(hud.clockText, "3:00")
+        XCTAssertEqual(hud.clockText, "1:30")
         scene.pressAction()
         scene.releaseAction(heldFor: 0.12)
         XCTAssertEqual(scene.simulation.kickCount, 1)
@@ -61,11 +61,15 @@ final class MatchSceneTests: XCTestCase {
         scene.releaseAction(heldFor: 0.12)
         var time = 0.0
         advance(scene, time: &time, frames: 90)
+        XCTAssertEqual(scene.simulation.phase, .halfTime)
+        XCTAssertEqual(whistles, 1)
+        scene.simulation.resumeAfterHalfTime()
+        advance(scene, time: &time, frames: 120)
         XCTAssertEqual(scene.simulation.phase, .fullTime)
         XCTAssertEqual(hud.status, "FULL TIME")
         XCTAssertEqual(hud.clockText, "0:00")
         XCTAssertEqual(hud.matchResult, "Honours even")
-        XCTAssertEqual(whistles, 1)
+        XCTAssertEqual(whistles, 2)
         let ball = scene.simulation.ball.position
         scene.setMovement(.up)
         scene.pressAction()
@@ -73,13 +77,36 @@ final class MatchSceneTests: XCTestCase {
         advance(scene, time: &time, frames: 90)
         XCTAssertEqual(scene.simulation.ball.position, ball)
         XCTAssertEqual(scene.simulation.kickCount, 1)
-        XCTAssertEqual(whistles, 1)
+        XCTAssertEqual(whistles, 2)
         scene.resetSandbox()
         XCTAssertEqual(hud.status, "BLUE KICKOFF")
         XCTAssertEqual(hud.clockText, "0:01")
         XCTAssertEqual(scene.simulation.kickCount, 0)
         advance(scene, time: &time, frames: 30)
-        XCTAssertEqual(whistles, 1)
+        XCTAssertEqual(whistles, 2)
+    }
+
+    func testKickoffAndHalfTimeExplainBothStartingDirections() {
+        for north in [true, false] {
+            let scene = GameScene(mode: .match, chooseStartingEnds: { north })
+            scene.simulation.tuning.matchDuration = 2
+            scene.simulation.tuning.aiSpeedScale = 0
+            var hud = SandboxHUD()
+            scene.onHUDUpdate = { hud = $0 }
+            scene.refreshHUD()
+            XCTAssertEqual(hud.attacksTopGoal, north)
+            XCTAssertTrue(hud.detail.contains("You attack the \(north ? "top" : "bottom") goal"))
+            scene.pressAction()
+            scene.releaseAction(heldFor: 0.08)
+            var time = 0.0
+            advance(scene, time: &time, frames: 100)
+            XCTAssertEqual(hud.status, "HALF TIME")
+            XCTAssertTrue(hud.detail.contains("You will attack the \(north ? "bottom" : "top") goal"))
+            scene.simulation.resumeAfterHalfTime()
+            scene.refreshHUD()
+            XCTAssertEqual(hud.attacksTopGoal, !north)
+            XCTAssertTrue(hud.detail.contains("You attack the \(north ? "bottom" : "top") goal"))
+        }
     }
 
     func testChangingModesRemovesClockAndRestoresFullMatchRoster() {
@@ -93,7 +120,7 @@ final class MatchSceneTests: XCTestCase {
         XCTAssertNil(hud.matchTimeRemaining)
         XCTAssertEqual(scene.simulation.footballers.count, 1)
         scene.setMode(.match)
-        XCTAssertEqual(hud.matchTimeRemaining, 180)
+        XCTAssertEqual(hud.matchTimeRemaining, 90)
         XCTAssertEqual(scene.simulation.footballers.count, 10)
         XCTAssertEqual(hud.status, "BLUE KICKOFF")
     }

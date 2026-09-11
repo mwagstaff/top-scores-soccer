@@ -107,21 +107,23 @@ final class PenaltyStateTests: XCTestCase {
         XCTAssertTrue(simulation.isTakingPenalty, "Waiting to aim must not discard an owed penalty")
         _ = launch(&simulation)
         simulation.roster[9].state.position = Vector2(x: 20, y: 20)
-        for _ in 0..<180 where simulation.phase != .fullTime { simulation.step(dt: tick) }
-        XCTAssertEqual(simulation.phase, .fullTime)
+        for _ in 0..<180 where simulation.phase != .halfTime { simulation.step(dt: tick) }
+        XCTAssertEqual(simulation.phase, .halfTime)
         XCTAssertEqual(simulation.northGoals, 1)
         XCTAssertEqual(simulation.southGoals, 0)
         XCTAssertEqual(simulation.matchTimeElapsed, simulation.matchDuration)
     }
 
-    func testPeriodExtendedForPenaltyEndsAtAnOutfieldTouchWithoutAReboundAttack() {
+    func testPeriodExtendedForPenaltyEndsWhenBallIsClearedOutOfAttack() {
         var simulation = penaltyFoul(atExpiry: true)
         place(&simulation)
         _ = launch(&simulation)
         simulation.roster[1].state = PlayerState(position: Vector2(x: -20, y: 0))
         simulation.ball = BallState(position: Vector2(x: -20, y: 1), velocity: .zero, mode: .free)
         simulation.step(dt: tick)
-        XCTAssertEqual(simulation.phase, .fullTime)
+        // A clearance must remain safe through the brief rebound/possession grace period.
+        for _ in 0..<60 where simulation.phase == .playing { simulation.step(dt: tick) }
+        XCTAssertEqual(simulation.phase, .halfTime)
         XCTAssertEqual(simulation.northGoals, 0)
         XCTAssertEqual(simulation.penaltyDoubleTouchCount, 0)
     }

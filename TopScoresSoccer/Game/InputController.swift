@@ -21,6 +21,8 @@ final class InputController: UIView {
     private var canHead = false
     private var preparingHeader = false
     private var queuedHeader = false
+    private var canCross = false
+    private var incomingCross = false
     private var waitingForAutomaticPlay = false
     private var holdingKeeper = false
     private var controllingKeeper = false
@@ -43,7 +45,7 @@ final class InputController: UIView {
         accessibilityIdentifier = "sandbox.surface"
         actionElement = UIAccessibilityElement(accessibilityContainer: self)
         actionElement.accessibilityLabel = "Action"
-        actionElement.accessibilityHint = "Aim and tap to pass to a teammate or into space. In defence, hold and release for a high, long clearance. Near goal, release in the green shot band, before the red overhit region. Near a reachable high ball, aim the joystick and tap to head it. With the keeper holding the ball, tap to throw to the highlighted teammate or hold for a high, long throw. For a goal kick, tap to pass to the highlighted teammate or hold for a high, long kick. Hold throw-ins for more distance. Before an incoming ball arrives, tap or hold and release to prepare your next kick. Off the ball, the joystick automatically selects a player for your intended run. Hold to slide, or run into the ball to tackle."
+        actionElement.accessibilityHint = "Aim and tap to pass to a teammate or into space. In defence, hold and release for a high, long clearance. Near goal with no nearby pass, aim towards goal and tap to shoot. Hold for more power, releasing in the green shot band before the red overhit region. On the attacking wing, hold to cross automatically towards your runners; release in green. Tap as your cross reaches an attacker to head towards goal. For other high balls, aim the joystick and tap to head it. With the keeper holding the ball, tap to throw to the highlighted teammate or hold for a high, long throw. For a goal kick, tap to pass to the highlighted teammate or hold for a high, long kick. Hold throw-ins for more distance. Before an incoming ball arrives, tap or hold and release to prepare your next kick. Off the ball, the joystick automatically selects a player for your intended run. Hold to slide, or run into the ball to tackle."
         actionElement.accessibilityIdentifier = "sandbox.action"
         standardActionHint = actionElement.accessibilityHint
         actionElement.accessibilityTraits = .button
@@ -127,6 +129,8 @@ final class InputController: UIView {
         let canHead = scene?.simulation.headingPlayerID != nil
         let preparingHeader = scene?.simulation.isPreparingHeader == true
         let queuedHeader = scene?.simulation.queuedActionKind == "header"
+        let canCross = scene?.simulation.canCross == true
+        let incomingCross = scene?.simulation.isCrossInFlight == true && scene?.simulation.lastTouchTeam == .blue
         let automaticRestart = scene?.simulation.isTakingRestart == true && scene?.simulation.matchRestart?.team == .red
         let waitingForAutomaticPlay = scene?.simulation.goalkeeperPossessionTeam == .red || automaticRestart
         let holdingKeeper = scene?.simulation.isHoldingGoalkeeper == true
@@ -145,9 +149,11 @@ final class InputController: UIView {
         }
         actionElement.accessibilityTraits = waitingForAutomaticPlay ? [.button, .notEnabled] : .button
         actionElement.accessibilityLabel = canHead || preparingHeader || queuedHeader ? "Head ball"
-            : takingPenalty ? "Take penalty" : "Action"
+            : takingPenalty ? "Take penalty" : canCross || power?.kind == .cross ? "Cross ball" : "Action"
         actionElement.accessibilityHint = takingPenalty
             ? "Aim with the joystick. Tap to shoot, or hold and release in the green power band."
+            : incomingCross ? "Tap as the cross reaches your attacker to head towards goal. Close contact and good timing improve the finish."
+            : canCross || power?.kind == .cross ? "Keep running and hold Action. Release in the green band to cross automatically towards attackers in the box. Too little power falls short; too much can sail past them. A short tap still passes."
             : standardActionHint
         if let scene, ProcessInfo.processInfo.arguments.contains("--uitesting") {
             let sim = scene.simulation
@@ -164,15 +170,17 @@ final class InputController: UIView {
                 "target:\(sim.passTargetID.map(String.init) ?? "none");receiverControl:\(sim.isControllingPassReceiver);",
                 rosterDetails,
                 "restart:\(sim.matchRestart?.kind.rawValue ?? "none");restartReady:\(sim.isTakingRestart);",
+                "attacksTopGoal:\(sim.ends.blueAttacksNorth);",
                 "penaltyReady:\(sim.isTakingPenalty);freeKickReady:\(sim.isTakingFreeKick);",
                 "shortOptionsReady:\(shortOptionsReady);",
                 "tackles:\(sim.tackleCount);running:\(sim.runningChallengeCount);switches:\(sim.switchCount);",
                 "slides:\(sim.slideCount);standing:\(sim.standingTackleCount);queue:\(sim.queuedActionKind ?? "none");fouls:\(sim.foulCount);canSwitch:\(sim.canSwitchToNearestPlayer);",
                 "kickKind:\(sim.lastKickKind ?? "none");receiving:\(canReceive);",
                 "canHead:\(canHead);preparingHeader:\(preparingHeader);headers:\(sim.headerCount);headerPlayer:\(sim.lastHeaderPlayerID.map(String.init) ?? "none");",
+                "canCross:\(canCross);crossInFlight:\(sim.isCrossInFlight);crosses:\(sim.crossCount);",
                 String(format: "chipWindow:%.2f;height:%.2f;", sim.chipWindowRemaining, sim.ball.height),
                 "keeperHands:\(holdingKeeper);keeperControl:\(controllingKeeper);power:\(power?.title ?? "none");powerKind:\(sim.powerMeterKind?.rawValue ?? "none");",
-                String(format: "powerFraction:%.2f;overhit:%@;", power?.fraction ?? 0, sim.isOverchargingShot ? "true" : "false")
+                String(format: "powerFraction:%.2f;overhit:%@;", power?.fraction ?? 0, sim.isOverchargingPower ? "true" : "false")
             ]
             actionElement.accessibilityValue = diagnostics.joined()
         } else {
@@ -181,9 +189,11 @@ final class InputController: UIView {
                 takingPenalty ? "Aim at the goal. Tap to shoot, or hold and release in the green band for more power. The goalkeeper will try to save it." :
                 takingThrowIn ? "Nearby teammates offer a short throw. Aim and tap to the highlighted player, or hold for more distance and release." :
                 takingGoalKick ? "Your keeper is taking a goal kick. Aim, tap to pass to the highlighted teammate, or hold and release for a high, long kick." :
-                queuedHeader ? "Header queued. Aim saved; move under the ball to meet it." :
-                preparingHeader ? "Preparing header. Aim the joystick and release Action." :
-                canHead ? "Aim the joystick and tap as the high ball reaches you." :
+                queuedHeader ? (incomingCross ? "Header queued towards goal. Move under the cross to meet it." : "Header queued. Aim saved; move under the ball to meet it.") :
+                preparingHeader ? (incomingCross ? "Jump timed towards goal. Move to meet the cross." : "Preparing header. Aim the joystick and release Action.") :
+                canHead ? (incomingCross ? "Tap as the cross reaches you to head towards goal." : "Aim the joystick and tap as the high ball reaches you.") :
+                incomingCross ? "Your attackers are meeting the cross. Tap Action as it reaches your player to head towards goal." :
+                canCross || power?.kind == .cross ? "Cross available. Keep running, hold Action, then release in green to find attackers in the box." :
                 curving ? "Steer sideways to swerve the ball." :
                 controllingKeeper && hasBall ? "Your keeper at feet. Move carefully, tap to pass or hold and release to kick." :
                 status == .queued ? "Next kick queued" :
@@ -196,6 +206,7 @@ final class InputController: UIView {
                 self.opponentHasBall != opponentHasBall || self.canSwitch != canSwitch || self.canReceive != canReceive ||
                 self.controllingReceiver != controllingReceiver ||
                 self.canHead != canHead || self.preparingHeader != preparingHeader || self.queuedHeader != queuedHeader ||
+                self.canCross != canCross || self.incomingCross != incomingCross ||
                 self.waitingForAutomaticPlay != waitingForAutomaticPlay || self.holdingKeeper != holdingKeeper ||
                 self.controllingKeeper != controllingKeeper || self.takingThrowIn != takingThrowIn ||
                 self.takingGoalKick != takingGoalKick || self.takingPenalty != takingPenalty || self.power != power else { return }
@@ -209,6 +220,8 @@ final class InputController: UIView {
         self.canHead = canHead
         self.preparingHeader = preparingHeader
         self.queuedHeader = queuedHeader
+        self.canCross = canCross
+        self.incomingCross = incomingCross
         self.waitingForAutomaticPlay = waitingForAutomaticPlay
         self.holdingKeeper = holdingKeeper
         self.controllingKeeper = controllingKeeper
@@ -325,7 +338,7 @@ final class InputController: UIView {
         }
 
         let pressed = actionTouch != nil
-        let activeColor = power?.overcharging == true ? UIColor(red: 1, green: 0.36, blue: 0.30, alpha: 1)
+        let activeColor = power?.overcharging == true || power?.isSweet == true ? power?.tint ?? accent
             : status == .charging || status == .queued ? accent : UIColor.white
         context.setFillColor(activeColor.withAlphaComponent(pressed ? 0.25 : 0.10).cgColor)
         context.setStrokeColor(activeColor.withAlphaComponent(hasBall || canHead || preparingHeader || pressed ? 0.65 : 0.28).cgColor)
@@ -342,7 +355,8 @@ final class InputController: UIView {
         drawText(actionTitle, at: actionCenter, size: 13, color: activeColor.withAlphaComponent(0.95))
         let actionHint = waitingForAutomaticPlay ? "AUTOMATIC" :
             holdingKeeper ? "TAP / HOLD" : takingThrowIn ? "HOLD FOR RANGE" :
-            queuedHeader ? "QUEUED" : preparingHeader ? "RELEASE" : canHead ? "AIM / TAP" :
+            queuedHeader ? "QUEUED" : preparingHeader ? (incomingCross ? "MEET THE BALL" : "RELEASE") : canHead ? (incomingCross ? "TIME YOUR TAP" : "AIM / TAP") :
+            canCross || power?.kind == .cross ? "HOLD / RELEASE" :
             !hasBall && !curving && opponentHasBall && !canReceive ? "HOLD" : "TAP / HOLD"
         drawText(cancelled ? "TRY AGAIN" : actionHint, at: CGPoint(x: actionCenter.x, y: actionCenter.y + 64), size: 10, color: .white.withAlphaComponent(0.72))
         if let power { drawPower(power, in: context) }
@@ -362,6 +376,7 @@ final class InputController: UIView {
         if takingGoalKick { return "KICK" }
         if takingPenalty { return "SHOOT" }
         if preparingHeader || canHead { return "HEAD" }
+        if canCross || power?.kind == .cross { return "CROSS" }
         if status == .charging { return hasBall || canReceive || controllingKeeper ? "KICK" : "SLIDE" }
         if canReceive { return "PREPARE" }
         if status == .recovering { return "RECOVER" }
@@ -379,9 +394,8 @@ final class InputController: UIView {
         let track = CGRect(x: frame.minX, y: frame.maxY - 11, width: frame.width, height: 10)
         let green = UIColor(red: 0.47, green: 0.96, blue: 0.44, alpha: 1)
         let red = UIColor(red: 1, green: 0.36, blue: 0.30, alpha: 1)
-        let blue = UIColor(red: 0.48, green: 0.86, blue: 1, alpha: 1)
         let amber = UIColor(red: 1, green: 0.78, blue: 0.30, alpha: 1)
-        let color = power.overcharging ? red : power.isSweet ? green : power.aboveSweet ? amber : blue
+        let color = power.tint
         context.setFillColor(UIColor(white: 0.025, alpha: 0.9).cgColor)
         context.fill(frame.insetBy(dx: -7, dy: -5))
         context.setFillColor(UIColor.white.withAlphaComponent(0.2).cgColor)
@@ -410,7 +424,7 @@ final class InputController: UIView {
         context.setFillColor(UIColor.white.cgColor)
         context.fill(CGRect(x: min(track.maxX - 2, max(track.minX, x - 1)), y: track.minY - 3, width: 3, height: 16))
         drawText(power.title, at: CGPoint(x: frame.midX, y: frame.minY + 5), size: 10,
-                 color: power.overcharging ? red : power.isSweet ? green : power.aboveSweet ? amber : .white)
+                 color: power.overcharging || power.isSweet || power.aboveSweet ? color : .white)
     }
 
     private func drawText(_ text: String, at center: CGPoint, size: CGFloat, color: UIColor) {

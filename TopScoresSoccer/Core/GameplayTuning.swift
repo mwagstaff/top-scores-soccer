@@ -2,6 +2,8 @@ import Foundation
 
 /// Pitch distances are metres; time is seconds; angles are radians unless named otherwise.
 struct GameplayTuning: Equatable, Sendable {
+    var difficulty: GameDifficulty = .medium
+    var foulInjuryChance = 0.04        // per foul; separate from card severity and difficulty
     var playerAcceleration = 42.0       // m/s², response toward requested speed
     var playerMaxSpeed = 10.5           // m/s
     var offBallSpeedBoost = 1.12        // multiplier; dribbling keeps normal running speed
@@ -76,7 +78,32 @@ struct GameplayTuning: Equatable, Sendable {
     var keeperFootReleaseDistance = 2.2 // m, tighter keeper dribble retention
     var keeperFootControlSpeed = 12.0   // m/s, keeper cushioning limit with feet
     var backheelReversalWindow = 0.12  // seconds between deliberate reverse swipe and release
-    var matchDuration = 180.0           // seconds of live play in one quick-match period
+    var matchDuration = 180.0           // seconds of live play across two halves
     var matchRestartDelay = 0.8         // seconds of restart feedback before placing the ball
     static let defaults = GameplayTuning()
+}
+
+enum GameDifficulty: String, CaseIterable, Sendable {
+    case easy, medium, hard
+
+    var title: String { rawValue.capitalized }
+    var description: String {
+        switch self {
+        case .easy: "Slower opponents, more hesitation and less accurate decisions."
+        case .medium: "Balanced pace, reactions and decision making."
+        case .hard: "Faster opponents who anticipate play and seek better passing lanes."
+        }
+    }
+    var speedMultiplier: Double {
+        switch self { case .easy: 0.82; case .medium: 1; case .hard: 1.16 }
+    }
+    var decisionInterval: Double {
+        switch self { case .easy: 1.55; case .medium: 1; case .hard: 0.55 }
+    }
+    var anticipation: Double {
+        switch self { case .easy: 0.06; case .medium: 0.16; case .hard: 0.34 }
+    }
+    var kickError: Double {
+        switch self { case .easy: 0.09; case .medium: 0; case .hard: 0 }
+    }
 }

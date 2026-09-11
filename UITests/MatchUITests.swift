@@ -13,12 +13,12 @@ final class MatchUITests: XCTestCase {
         assertValue(action, contains: "selectedKeeper:false;")
         let clock = element("match.clock", in: app)
         XCTAssertTrue(clock.waitForExistence(timeout: 5))
-        XCTAssertEqual(clock.label, "Time remaining 3:00")
+        XCTAssertEqual(clock.label, "1st half, time remaining 1:30")
         waitForKickoff(in: app)
         attach(app, name: "5v5 kickoff and match clock")
         action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kicks:1;")
-        let clockRunning = NSPredicate(format: "label != %@", "Time remaining 3:00")
+        let clockRunning = NSPredicate(format: "label != %@", "1st half, time remaining 1:30")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: clockRunning, object: clock)], timeout: 5), .completed)
 
         element("sandbox.pause", in: app).tap()
@@ -37,33 +37,52 @@ final class MatchUITests: XCTestCase {
         assertValue(action, contains: "mode:match;")
         assertValue(action, contains: "players:10;")
         waitForKickoff(in: app)
-        XCTAssertEqual(clock.label, "Time remaining 3:00")
+        XCTAssertEqual(clock.label, "1st half, time remaining 1:30")
     }
 
     func testFullTimeShowsResultAndPlayAgainResetsMatch() {
-        let app = launchMatch(short: true)
+        checkHalfTimeAndReplay(north: true)
+    }
+
+    func testSouthKickoffSwapsToNorthAtHalfTime() {
+        checkHalfTimeAndReplay(north: false)
+    }
+
+    private func checkHalfTimeAndReplay(north: Bool) {
+        let app = launchMatch(short: true, north: north)
         waitForKickoff(in: app)
         let action = element("sandbox.action", in: app)
+        assertValue(action, contains: "attacksTopGoal:\(north);")
+        XCTAssertTrue(element("match.team-counts", in: app).label.hasSuffix(north ? "↑" : "↓"))
         action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let secondHalf = app.buttons["match.second-half"]
+        XCTAssertTrue(secondHalf.waitForExistence(timeout: 10))
+        XCTAssertEqual(element("match.half-time-direction", in: app).label,
+                       "Teams swap ends. You will attack the \(north ? "bottom" : "top") goal.")
+        attach(app, name: "Half-time")
+        secondHalf.tap()
         let again = app.buttons["match.play-again"]
         XCTAssertTrue(again.waitForExistence(timeout: 10))
-        XCTAssertEqual(element("match.clock", in: app).label, "Time remaining 0:00")
+        assertValue(action, contains: "attacksTopGoal:\(!north);")
+        XCTAssertTrue(element("match.team-counts", in: app).label.hasSuffix(north ? "↓" : "↑"))
+        XCTAssertEqual(element("match.clock", in: app).label, "2nd half, time remaining 0:00")
         XCTAssertEqual(element("match.result", in: app).label, "Honours even")
         XCTAssertTrue(again.isHittable)
         attach(app, name: "Full time and play again")
         again.tap()
         XCTAssertFalse(again.exists)
         waitForKickoff(in: app)
-        XCTAssertEqual(element("match.clock", in: app).label, "Time remaining 0:02")
+        XCTAssertEqual(element("match.clock", in: app).label, "1st half, time remaining 0:01")
         assertValue(action, contains: "kicks:0;")
         assertValue(action, contains: "selectedKeeper:false;")
+        assertValue(action, contains: "attacksTopGoal:\(north);")
     }
 
-    private func launchMatch(short: Bool = false) -> XCUIApplication {
+    private func launchMatch(short: Bool = false, north: Bool = true) -> XCUIApplication {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
-        app.launchArguments = ["--uitesting"] + (short ? ["--short-match"] : [])
+        app.launchArguments = ["--uitesting"] + (short ? ["--short-match"] : []) + (north ? [] : ["--south-kickoff"])
         app.launch()
         return app
     }
