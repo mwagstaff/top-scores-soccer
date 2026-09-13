@@ -41,7 +41,7 @@ final class RestartOptionsUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["BLUE FREE KICK"].exists)
         attach(app, name: "Free kick — nearby outlet and opponents standing back")
         let before = try integerField("kicks", in: action)
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kicks:\(before + 1);")
         // Native scene tests verify the immediate target handover. UI inspection takes
         // time while defenders continue playing, so check the completed restart here.
@@ -62,7 +62,7 @@ final class RestartOptionsUITests: XCTestCase {
         _ = try integerField("target", in: action)
         let before = try integerField("kicks", in: action)
         attach(app, name: "Throw-in — nearby receiving options")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kicks:\(before + 1);")
         assertValue(action, contains: "kickKind:throw in;")
         assertValue(action, contains: "lastKick:pass;")

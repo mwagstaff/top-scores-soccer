@@ -75,7 +75,7 @@ final class KickPresentationTests: XCTestCase {
         refresh(input, scene: scene)
         XCTAssertEqual(scene.powerFeedback?.kind, .keeperDistribution)
         XCTAssertEqual(scene.powerFeedback?.title, "LONG THROW")
-        XCTAssertEqual(input.actionTitle, "THROW")
+        XCTAssertEqual(input.actionTitle, "LONG THROW")
         XCTAssertTrue(scene.powerFeedback?.guidance.contains("Release to throw") == true)
         XCTAssertNil(scene.powerFeedback?.sweetSpot)
         XCTAssertFalse(action.accessibilityTraits.contains(.notEnabled))
@@ -96,8 +96,8 @@ final class KickPresentationTests: XCTestCase {
         scene.onHUDUpdate = { hud = $0 }
         scene.setMovement(.up, timestamp: 350)
         refresh(input, scene: scene)
-        XCTAssertEqual(input.actionTitle, "KICK")
-        XCTAssertTrue(hud.detail.contains("Tap to pass"))
+        XCTAssertEqual(input.actionTitle, "LONG BALL")
+        XCTAssertTrue(hud.detail.contains("PASS to"))
         let action = try XCTUnwrap(elements(input).first { $0.accessibilityIdentifier == "sandbox.action" })
         if !ProcessInfo.processInfo.arguments.contains("--uitesting") {
             XCTAssertTrue(action.accessibilityValue?.contains("goal kick") == true)
@@ -108,7 +108,7 @@ final class KickPresentationTests: XCTestCase {
         XCTAssertEqual(scene.powerFeedback?.kind, .longKick)
         XCTAssertNil(scene.powerFeedback?.sweetSpot)
         XCTAssertEqual(hud.status, "HOLD FOR HEIGHT")
-        XCTAssertEqual(input.actionTitle, "KICK")
+        XCTAssertEqual(input.actionTitle, "LONG BALL")
         attach(input, named: "Goal-kick meter — hold high and long")
         scene.releaseAction(heldFor: 0.85)
         XCTAssertEqual(scene.simulation.lastKickKind, "long goal kick")

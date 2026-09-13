@@ -3,6 +3,63 @@ import Foundation
 /// Initial kick conditions only. Interceptions, posts, aftertouch and gravity remain
 /// physical simulation events; no flight is steered or guaranteed to become a goal.
 enum KickMechanics {
+    /// The visible band and the actual launch share this distance-dependent profile.
+    struct ShotPower: Equatable, Sendable {
+        let fraction: Double
+        let sweetSpot: ClosedRange<Double>
+        let overhitStart: Double
+        var isOverhit: Bool { fraction > overhitStart }
+    }
+
+    static func distancePower(distance: Double, heldFor: Double, tuning: GameplayTuning) -> ShotPower {
+        let distance = bounded(distance, fallback: 20, minimum: 0, maximum: 120)
+        let duration = bounded(tuning.shotChargeDuration, fallback: 0.95, minimum: 0.2, maximum: 3)
+        let fraction = bounded(heldFor, fallback: 0, minimum: 0, maximum: 10) / duration
+        let range = bounded(tuning.shootingRange, fallback: 35, minimum: 20, maximum: 50)
+        let reach = min(1, distance / range)
+        let centre = 0.10 + 0.68 * pow(reach, 0.9)
+        let halfWidth = 0.17 - 0.10 * reach
+        let band = max(0, centre - halfWidth)...min(0.9, centre + halfWidth)
+        return ShotPower(fraction: min(1, fraction), sweetSpot: band,
+                         overhitStart: min(0.97, band.upperBound + 0.08))
+    }
+
+    /// A dedicated shot always aims at the opposition goal. Power affects pace,
+    /// elevation and reproducible execution spread, never the scoring rules.
+    static func chargedShot(origin: Vector2, aim: Vector2, facing: Vector2, team: Team,
+                            heldFor: Double, tuning: GameplayTuning, ends: MatchEnds,
+                            sequence: Int) -> Shot? {
+        guard origin.x.isFinite, origin.y.isFinite, aim.x.isFinite, aim.y.isFinite,
+              heldFor.isFinite, heldFor >= 0 else { return nil }
+        let attack = ends.attackSign(for: team)
+        let goal = Vector2(x: 0, y: Pitch.length / 2 * attack)
+        let offset = goal - origin
+        let distance = offset.length
+        let profile = distancePower(distance: distance, heldFor: heldFor, tuning: tuning)
+        let power = profile.fraction
+        let goalward = offset.normalized
+        let requested = aim.length > 0.001 && aim.normalized.dot(goalward) > 0.25 ? aim.normalized : goalward
+        let crossingY = goal.y + Pitch.ballRadius * attack
+        let cornerLimit = Pitch.goalWidth / 2 - Pitch.postRadius - Pitch.ballRadius - 0.22
+        let rayX = origin.x + requested.x * max(0, (crossingY - origin.y) * attack)
+            / max(0.05, requested.y * attack)
+        let target = Vector2(x: min(cornerLimit, max(-cornerLimit, rayX)), y: crossingY)
+        let speed = 12 + (bounded(tuning.shotMaxSpeed, fallback: 47, minimum: 25, maximum: 65) - 12) * power
+        let excess = max(0, power - profile.overhitStart) / max(0.03, 1 - profile.overhitStart)
+        let needed = (profile.sweetSpot.lowerBound + profile.sweetSpot.upperBound) / 2
+        let referenceSpeed = 12 + (bounded(tuning.shotMaxSpeed, fallback: 47, minimum: 25, maximum: 65) - 12) * max(power, needed)
+        let flightTime = max(0.04, (target - origin).length / referenceSpeed)
+        let height = 0.15 + 1.15 * power + 3.5 * excess
+        let gravity = bounded(tuning.ballGravity, fallback: 18, minimum: 0.1, maximum: 80)
+        let lift = power < 0.08 ? 0 : min(28, height / flightTime + 0.5 * gravity * flightTime)
+        let awkward = (1 - facing.normalized.dot(goalward)) * 0.5
+        let spread = 0.003 + pow(min(1.5, distance / 35), 2) * 0.038
+            + power * power * 0.015 + excess * 0.085 + awkward * 0.022
+        let error = sin(Double(sequence + 1) * 2.399963229728653) * spread
+        return Shot(direction: (target - origin).normalized.rotated(by: error), speed: speed,
+                    verticalVelocity: lift, isOverhit: profile.isOverhit)
+    }
+
     struct Shot: Equatable, Sendable {
         let direction: Vector2
         let speed: Double

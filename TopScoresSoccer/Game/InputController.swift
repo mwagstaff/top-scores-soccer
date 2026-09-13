@@ -1,11 +1,18 @@
 import UIKit
 
+@MainActor
+private final class FootballActionElement: UIAccessibilityElement {
+    var activate: (() -> Bool)?
+    override func accessibilityActivate() -> Bool { activate?() ?? false }
+}
+
 /// Tracks each thumb independently. UIKit timestamps determine tap/hold duration.
 @MainActor
 final class InputController: UIView {
     weak var scene: GameScene?
     private var movementTouch: UITouch?
     private var actionTouch: UITouch?
+    private var pressedButton: PlayerActionButton?
     private var actionStartedAt = 0.0
     private(set) var joystickOrigin: CGPoint?
     private(set) var joystickOffset = CGPoint.zero
@@ -31,8 +38,9 @@ final class InputController: UIView {
     private var takingPenalty = false
     private var power: KickPowerFeedback?
     private let stickRadius: CGFloat = 52
-    private let actionRadius: CGFloat = 47
+    private var actionRadius: CGFloat { min(47, max(36, bounds.width * 0.12)) }
     private var actionElement: UIAccessibilityElement!
+    private var passElement: UIAccessibilityElement!
     private var joystickElement: UIAccessibilityElement!
     private var powerElement: UIAccessibilityElement!
     private var standardActionHint: String?
@@ -43,12 +51,21 @@ final class InputController: UIView {
         backgroundColor = .clear
         isMultipleTouchEnabled = true
         accessibilityIdentifier = "sandbox.surface"
-        actionElement = UIAccessibilityElement(accessibilityContainer: self)
-        actionElement.accessibilityLabel = "Action"
-        actionElement.accessibilityHint = "Aim and tap to pass to a teammate or into space. In defence, hold and release for a high, long clearance. Near goal with no nearby pass, aim towards goal and tap to shoot. Hold for more power, releasing in the green shot band before the red overhit region. On the attacking wing, hold to cross automatically towards your runners; release in green. Tap as your cross reaches an attacker to head towards goal. For other high balls, aim the joystick and tap to head it. With the keeper holding the ball, tap to throw to the highlighted teammate or hold for a high, long throw. For a goal kick, tap to pass to the highlighted teammate or hold for a high, long kick. Hold throw-ins for more distance. Before an incoming ball arrives, tap or hold and release to prepare your next kick. Off the ball, the joystick automatically selects a player for your intended run. Hold to slide, or run into the ball to tackle."
+        let shootingElement = FootballActionElement(accessibilityContainer: self)
+        shootingElement.activate = { [weak self] in self?.activateButton(.shoot, heldFor: 0.08) ?? false }
+        actionElement = shootingElement
+        actionElement.accessibilityLabel = "Shoot or long ball"
+        actionElement.accessibilityHint = "Within 35 metres of goal, tap to shoot or hold and release for power. Outside that range, hold and release for a long ball or cross. Off the ball, press to slide tackle. When receiving, prepare a shot or header."
         actionElement.accessibilityIdentifier = "sandbox.action"
         standardActionHint = actionElement.accessibilityHint
         actionElement.accessibilityTraits = .button
+        let passingElement = FootballActionElement(accessibilityContainer: self)
+        passingElement.activate = { [weak self] in self?.activateButton(.pass) ?? false }
+        passElement = passingElement
+        passElement.accessibilityLabel = "Short pass or block tackle"
+        passElement.accessibilityHint = "Press to play a short ground pass in the joystick direction. Off the ball, press for a standing block tackle. When receiving, prepare a first-time pass or header pass."
+        passElement.accessibilityIdentifier = "sandbox.pass"
+        passElement.accessibilityTraits = .button
         joystickElement = UIAccessibilityElement(accessibilityContainer: self)
         joystickElement.accessibilityLabel = "Movement joystick"
         joystickElement.accessibilityHint = "Touch anywhere on the left side of the pitch, then drag to move and aim. Each new touch centres the joystick under your thumb. Off the ball, your direction automatically selects a nearby player to reach the ball or block its carrier. Run into an opponent's ball from the front or side to win it. From behind, stay close and keep pressing. Steer sideways after shooting to bend the ball, or quickly pull opposite your kick to chip it."
@@ -57,7 +74,7 @@ final class InputController: UIView {
         powerElement = UIAccessibilityElement(accessibilityContainer: self)
         powerElement.accessibilityIdentifier = "sandbox.power"
         powerElement.accessibilityTraits = [.staticText, .updatesFrequently]
-        accessibilityElements = [joystickElement!, actionElement!]
+        accessibilityElements = [joystickElement!, passElement!, actionElement!]
     }
 
     required init?(coder: NSCoder) { fatalError("Use init(frame:)") }
@@ -67,8 +84,12 @@ final class InputController: UIView {
                 y: bounds.height - max(safeAreaInsets.bottom + 76, 88))
     }
     private var actionCenter: CGPoint {
-        CGPoint(x: bounds.width - max(safeAreaInsets.right + 86, bounds.width * 0.14),
+        CGPoint(x: bounds.width - max(safeAreaInsets.right + 56, bounds.width * 0.14),
                 y: restingStick.y)
+    }
+
+    private var passCenter: CGPoint {
+        CGPoint(x: actionCenter.x - actionRadius * 2 - 16, y: actionCenter.y - 10)
     }
 
     override func layoutSubviews() {
@@ -99,6 +120,8 @@ final class InputController: UIView {
         actionElement.accessibilityFrameInContainerSpace = CGRect(x: actionCenter.x - actionRadius,
                                                                   y: actionCenter.y - actionRadius,
                                                                   width: actionRadius * 2, height: actionRadius * 2)
+        passElement.accessibilityFrameInContainerSpace = CGRect(x: passCenter.x - actionRadius,
+            y: passCenter.y - actionRadius, width: actionRadius * 2, height: actionRadius * 2)
         let origin = joystickOrigin ?? restingStick
         joystickElement.accessibilityFrameInContainerSpace = CGRect(x: origin.x - stickRadius,
                                                                     y: origin.y - stickRadius,
@@ -111,13 +134,14 @@ final class InputController: UIView {
     func clearTouches() {
         movementTouch = nil
         actionTouch = nil
+        pressedButton = nil
         actionStartedAt = 0
         joystickOrigin = nil
         joystickOffset = .zero
         scene?.setMovement(.zero)
         status = .idle
         power = nil
-        accessibilityElements = [joystickElement!, actionElement!]
+        accessibilityElements = [joystickElement!, passElement!, actionElement!]
         updateAccessibilityFrames()
         setNeedsDisplay()
     }
@@ -144,17 +168,12 @@ final class InputController: UIView {
             powerElement.accessibilityValue = power.accessibilityValue
         }
         if (power != nil) != (self.power != nil) {
-            accessibilityElements = power != nil ? [joystickElement!, powerElement!, actionElement!]
-                : [joystickElement!, actionElement!]
+            accessibilityElements = power != nil ? [joystickElement!, powerElement!, passElement!, actionElement!]
+                : [joystickElement!, passElement!, actionElement!]
         }
         actionElement.accessibilityTraits = waitingForAutomaticPlay ? [.button, .notEnabled] : .button
-        actionElement.accessibilityLabel = canHead || preparingHeader || queuedHeader ? "Head ball"
-            : takingPenalty ? "Take penalty" : canCross || power?.kind == .cross ? "Cross ball" : "Action"
-        actionElement.accessibilityHint = takingPenalty
-            ? "Aim with the joystick. Tap to shoot, or hold and release in the green power band."
-            : incomingCross ? "Tap as the cross reaches your attacker to head towards goal. Close contact and good timing improve the finish."
-            : canCross || power?.kind == .cross ? "Keep running and hold Action. Release in the green band to cross automatically towards attackers in the box. Too little power falls short; too much can sail past them. A short tap still passes."
-            : standardActionHint
+        passElement.accessibilityTraits = waitingForAutomaticPlay || takingPenalty ? [.button, .notEnabled] : .button
+        actionElement.accessibilityHint = standardActionHint
         if let scene, ProcessInfo.processInfo.arguments.contains("--uitesting") {
             let sim = scene.simulation
             let rosterDetails = "keepers:\(sim.footballers.filter { $0.isGoalkeeper }.count);selectedKeeper:\(sim.footballers[sim.selectedPlayerID].isGoalkeeper);"
@@ -168,6 +187,7 @@ final class InputController: UIView {
                 String(format: "player:%.2f,%.2f;", sim.player.position.x, sim.player.position.y),
                 "mode:\(sim.mode.rawValue);players:\(sim.footballers.count);selected:\(sim.selectedPlayerID);",
                 "target:\(sim.passTargetID.map(String.init) ?? "none");receiverControl:\(sim.isControllingPassReceiver);",
+                "shortTarget:\(sim.shortPassTargetID.map(String.init) ?? "none");",
                 rosterDetails,
                 "restart:\(sim.matchRestart?.kind.rawValue ?? "none");restartReady:\(sim.isTakingRestart);",
                 "attacksTopGoal:\(sim.ends.blueAttacksNorth);",
@@ -184,32 +204,9 @@ final class InputController: UIView {
             ]
             actionElement.accessibilityValue = diagnostics.joined()
         } else {
-            actionElement.accessibilityValue = waitingForAutomaticPlay ? "Automatic opposition restart or goalkeeper distribution; move into position" :
-                holdingKeeper ? "Your keeper has the ball in hands. Aim, tap to throw to the highlighted teammate, or hold and release for a high, long throw." :
-                takingPenalty ? "Aim at the goal. Tap to shoot, or hold and release in the green band for more power. The goalkeeper will try to save it." :
-                takingThrowIn ? "Nearby teammates offer a short throw. Aim and tap to the highlighted player, or hold for more distance and release." :
-                takingGoalKick ? "Your keeper is taking a goal kick. Aim, tap to pass to the highlighted teammate, or hold and release for a high, long kick." :
-                queuedHeader ? (incomingCross ? "Header queued towards goal. Move under the cross to meet it." : "Header queued. Aim saved; move under the ball to meet it.") :
-                preparingHeader ? (incomingCross ? "Jump timed towards goal. Move to meet the cross." : "Preparing header. Aim the joystick and release Action.") :
-                canHead ? (incomingCross ? "Tap as the cross reaches you to head towards goal." : "Aim the joystick and tap as the high ball reaches you.") :
-                incomingCross ? "Your attackers are meeting the cross. Tap Action as it reaches your player to head towards goal." :
-                canCross || power?.kind == .cross ? "Cross available. Keep running, hold Action, then release in green to find attackers in the box." :
-                curving ? "Steer sideways to swerve the ball." :
-                controllingKeeper && hasBall ? "Your keeper at feet. Move carefully, tap to pass or hold and release to kick." :
-                status == .queued ? "Next kick queued" :
-                controllingReceiver ? "You control the intended receiver. Steer to move, or centre the joystick to meet the ball. Tap or hold and release to prepare the next kick." :
-                canReceive ? "Incoming ball: aim, then tap or hold and release to prepare the next kick" :
-                status == .idle ? (hasBall ? "Ready to pass, play into space or shoot" : "Joystick selects your player automatically; hold to slide") : status.rawValue
+            actionElement.accessibilityValue = power?.accessibilityValue
         }
         let opponentHasBall = scene?.simulation.possessionTeam == .red
-        guard self.status != status || self.hasBall != hasBall || self.curving != curving ||
-                self.opponentHasBall != opponentHasBall || self.canSwitch != canSwitch || self.canReceive != canReceive ||
-                self.controllingReceiver != controllingReceiver ||
-                self.canHead != canHead || self.preparingHeader != preparingHeader || self.queuedHeader != queuedHeader ||
-                self.canCross != canCross || self.incomingCross != incomingCross ||
-                self.waitingForAutomaticPlay != waitingForAutomaticPlay || self.holdingKeeper != holdingKeeper ||
-                self.controllingKeeper != controllingKeeper || self.takingThrowIn != takingThrowIn ||
-                self.takingGoalKick != takingGoalKick || self.takingPenalty != takingPenalty || self.power != power else { return }
         self.status = status
         self.hasBall = hasBall
         self.curving = curving
@@ -229,6 +226,32 @@ final class InputController: UIView {
         self.takingGoalKick = takingGoalKick
         self.takingPenalty = takingPenalty
         self.power = power
+        actionElement.accessibilityCustomActions = (hasBall || canReceive) && !waitingForAutomaticPlay
+            ? [("Low power kick", 0.25), ("Medium power kick", 0.55), ("High power kick", 0.85)].map { name, fraction in
+                UIAccessibilityCustomAction(name: name) { [weak self] _ in
+                    guard let self else { return false }
+                    return self.activateButton(.shoot, heldFor: fraction * (self.scene?.simulation.tuning.shotChargeDuration ?? 0.95))
+                }
+            } : nil
+        actionElement.accessibilityLabel = takingPenalty ? "Take penalty"
+            : canHead || preparingHeader || queuedHeader ? "Head ball"
+            : actionTitle == "CROSS" ? "Cross ball" : actionTitle.capitalized
+        actionElement.accessibilityHint = takingPenalty
+            ? "Aim with the joystick. Tap SHOOT, or hold and release in the green power band."
+            : incomingCross ? "Tap as the cross reaches your attacker to head towards goal. Press HEAD PASS for a directional header pass."
+            : actionTitle == "CROSS" ? "Hold and release in green to cross automatically towards your runners. Press PASS for a short ground pass."
+            : standardActionHint
+        if !ProcessInfo.processInfo.arguments.contains("--uitesting"), power == nil {
+            actionElement.accessibilityValue = waitingForAutomaticPlay ? "Opposition restarting; move into position"
+                : takingGoalKick ? "Your keeper is taking a goal kick. PASS plays short; hold LONG BALL for distance."
+                : holdingKeeper ? "Your keeper has the ball. SHORT THROW finds a nearby teammate; hold LONG THROW for distance."
+                : controllingReceiver ? "You control the intended receiver. Steer to move, or centre to meet the ball. PASS or SHOOT prepares the next touch."
+                : canReceive ? "Incoming ball. PASS or SHOOT prepares your next touch."
+                : hasBall ? "PASS plays short. Hold the shooting button for power, then release."
+                : "Press BLOCK for a standing tackle or SLIDE for a sliding tackle."
+        }
+        passElement.accessibilityLabel = passTitle.capitalized
+        passElement.accessibilityValue = takingPenalty ? "Unavailable during penalties" : nil
         updateAccessibilityFrames()
         setNeedsDisplay()
     }
@@ -239,9 +262,9 @@ final class InputController: UIView {
             let point = touch.location(in: self)
             switch touchRole(at: point) {
             case .action where actionTouch == nil:
-                actionTouch = touch
-                actionStartedAt = touch.timestamp
-                scene.pressAction(startedAt: touch.timestamp)
+                beginActionTouch(touch, button: .shoot)
+            case .pass where actionTouch == nil:
+                beginActionTouch(touch, button: .pass)
             case .movement where beginMovement(at: point, timestamp: touch.timestamp):
                 movementTouch = touch
             default:
@@ -251,6 +274,22 @@ final class InputController: UIView {
         setNeedsDisplay()
     }
 
+    private func beginActionTouch(_ touch: UITouch, button: PlayerActionButton) {
+        guard !waitingForAutomaticPlay, button != .pass || !takingPenalty else { return }
+        actionTouch = touch
+        pressedButton = button
+        actionStartedAt = touch.timestamp
+        scene?.pressAction(button: button, startedAt: touch.timestamp)
+    }
+
+    private func activateButton(_ button: PlayerActionButton, heldFor duration: Double = 0) -> Bool {
+        guard let scene, !scene.gameplayPaused, scene.simulation.phase == .playing,
+              actionTouch == nil, !waitingForAutomaticPlay, button != .pass || !takingPenalty else { return false }
+        scene.pressAction(button: button)
+        if button == .shoot { scene.releaseAction(heldFor: duration) }
+        return true
+    }
+
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for touch in touches where touch === movementTouch { moveMovement(to: touch.location(in: self), timestamp: touch.timestamp) }
     }
@@ -258,8 +297,9 @@ final class InputController: UIView {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         // Release ACTION before clearing movement when both thumbs lift in the same event.
         for touch in touches where touch === actionTouch {
-            scene?.releaseAction(heldFor: max(0, touch.timestamp - actionStartedAt))
+            if pressedButton == .shoot { scene?.releaseAction(heldFor: max(0, touch.timestamp - actionStartedAt)) }
             actionTouch = nil
+            pressedButton = nil
             actionStartedAt = 0
         }
         for touch in touches where touch === movementTouch {
@@ -273,13 +313,14 @@ final class InputController: UIView {
         clearTouches()
     }
 
-    enum TouchRole: Equatable { case movement, action }
+    enum TouchRole: Equatable { case movement, action, pass }
 
     /// Native toolbar controls sit above this view. Within the game surface, ACTION
     /// always owns its hit area, even if another thumb already holds the button.
     func touchRole(at point: CGPoint) -> TouchRole? {
         guard bounds.contains(point) else { return nil }
-        if hypot(point.x - actionCenter.x, point.y - actionCenter.y) <= actionRadius + 20 { return .action }
+        if hypot(point.x - actionCenter.x, point.y - actionCenter.y) <= actionRadius + 7 { return .action }
+        if hypot(point.x - passCenter.x, point.y - passCenter.y) <= actionRadius + 7 { return .pass }
         return point.x < bounds.midX ? .movement : nil
     }
 
@@ -337,56 +378,65 @@ final class InputController: UIView {
                      color: .white.withAlphaComponent(0.50))
         }
 
-        let pressed = actionTouch != nil
-        let activeColor = power?.overcharging == true || power?.isSweet == true ? power?.tint ?? accent
-            : status == .charging || status == .queued ? accent : UIColor.white
-        context.setFillColor(activeColor.withAlphaComponent(pressed ? 0.25 : 0.10).cgColor)
-        context.setStrokeColor(activeColor.withAlphaComponent(hasBall || canHead || preparingHeader || pressed ? 0.65 : 0.28).cgColor)
-        context.setLineWidth(pressed ? 3 : 1.5)
-        context.addEllipse(in: CGRect(x: actionCenter.x - actionRadius, y: actionCenter.y - actionRadius,
-                                     width: actionRadius * 2, height: actionRadius * 2))
-        context.drawPath(using: .fillStroke)
-        if pressed {
-            context.setStrokeColor(activeColor.withAlphaComponent(0.30).cgColor)
-            context.strokeEllipse(in: CGRect(x: actionCenter.x - actionRadius - 7, y: actionCenter.y - actionRadius - 7,
-                                            width: actionRadius * 2 + 14, height: actionRadius * 2 + 14))
-        }
-        let cancelled = pressed && status == .cancelled && !canSwitch
-        drawText(actionTitle, at: actionCenter, size: 13, color: activeColor.withAlphaComponent(0.95))
-        let actionHint = waitingForAutomaticPlay ? "AUTOMATIC" :
-            holdingKeeper ? "TAP / HOLD" : takingThrowIn ? "HOLD FOR RANGE" :
-            queuedHeader ? "QUEUED" : preparingHeader ? (incomingCross ? "MEET THE BALL" : "RELEASE") : canHead ? (incomingCross ? "TIME YOUR TAP" : "AIM / TAP") :
-            canCross || power?.kind == .cross ? "HOLD / RELEASE" :
-            !hasBall && !curving && opponentHasBall && !canReceive ? "HOLD" : "TAP / HOLD"
-        drawText(cancelled ? "TRY AGAIN" : actionHint, at: CGPoint(x: actionCenter.x, y: actionCenter.y + 64), size: 10, color: .white.withAlphaComponent(0.72))
+        drawActionButton(title: actionTitle, subtitle: hasBall || canReceive ? "HOLD / RELEASE" : "PRESS",
+                         center: actionCenter, button: .shoot, context: context)
+        drawActionButton(title: passTitle, subtitle: "PRESS", center: passCenter, button: .pass, context: context)
         if let power { drawPower(power, in: context) }
     }
 
-    /// Shared by the rendered button and presentation tests; touch routing stays
-    /// with the simulation's committed action even when eligibility changes.
+    private func drawActionButton(title: String, subtitle: String, center: CGPoint,
+                                  button: PlayerActionButton, context: CGContext) {
+        let pressed = actionTouch != nil && pressedButton == button
+        let disabled = waitingForAutomaticPlay || (button == .pass && takingPenalty)
+        let color: UIColor = button == .shoot ? (power?.tint ?? UIColor(red: 1, green: 0.80, blue: 0.40, alpha: 1))
+            : UIColor(red: 0.62, green: 0.91, blue: 1, alpha: 1)
+        context.setFillColor(UIColor(white: 0.025, alpha: pressed ? 0.80 : 0.55).cgColor)
+        context.setStrokeColor(color.withAlphaComponent(disabled ? 0.25 : 0.9).cgColor)
+        context.setLineWidth(pressed ? 3 : 1.5)
+        context.addEllipse(in: CGRect(x: center.x - actionRadius, y: center.y - actionRadius,
+                                     width: actionRadius * 2, height: actionRadius * 2))
+        context.drawPath(using: .fillStroke)
+        if pressed {
+            context.setFillColor(color.withAlphaComponent(0.22).cgColor)
+            context.fillEllipse(in: CGRect(x: center.x - actionRadius, y: center.y - actionRadius,
+                                           width: actionRadius * 2, height: actionRadius * 2))
+        }
+        drawText(title, at: CGPoint(x: center.x, y: center.y - 7), size: title.count > 8 ? 10 : 13,
+                 color: color.withAlphaComponent(disabled ? 0.4 : 1))
+        drawText(disabled ? "WAIT" : subtitle, at: CGPoint(x: center.x, y: center.y + 16), size: 8,
+                 color: UIColor.white.withAlphaComponent(disabled ? 0.3 : 0.72))
+    }
+
+    var passTitle: String {
+        if holdingKeeper || takingThrowIn { return "SHORT THROW" }
+        if takingPenalty { return "PASS" }
+        if preparingHeader || canHead { return "HEAD PASS" }
+        if hasBall || canReceive || takingGoalKick { return "PASS" }
+        return "BLOCK"
+    }
+
     var actionTitle: String {
-        if waitingForAutomaticPlay { return "WAIT" }
-        if actionTouch != nil && status == .cancelled && !canSwitch { return "RELEASE" }
-        if status == .sliding { return "SLIDE" }
-        if queuedHeader { return "HEADER" }
-        if status == .queued { return "QUEUED" }
-        if status == .tackling { return "TACKLE" }
-        if holdingKeeper { return "THROW" }
-        if takingThrowIn { return "THROW" }
-        if takingGoalKick { return "KICK" }
+        if actionTouch != nil && status == .cancelled { return "RELEASE" }
+        if holdingKeeper || takingThrowIn { return "LONG THROW" }
+        if takingGoalKick { return "LONG BALL" }
         if takingPenalty { return "SHOOT" }
+        if queuedHeader { return "HEADER" }
         if preparingHeader || canHead { return "HEAD" }
-        if canCross || power?.kind == .cross { return "CROSS" }
-        if status == .charging { return hasBall || canReceive || controllingKeeper ? "KICK" : "SLIDE" }
-        if canReceive { return "PREPARE" }
+        if status == .sliding { return "SLIDE" }
+        if status == .queued { return "QUEUED" }
         if status == .recovering { return "RECOVER" }
-        return !hasBall && !curving && opponentHasBall ? "SLIDE" : "ACTION"
+        if !hasBall && !canReceive { return "SLIDE" }
+        switch scene?.simulation.shootingButtonIntent {
+        case .shot: return "SHOOT"
+        case .cross: return "CROSS"
+        default: return "LONG BALL"
+        }
     }
 
     private var powerFrame: CGRect {
         let width = min(176, bounds.width * 0.44)
         return CGRect(x: min(bounds.width - safeAreaInsets.right - width - 12, actionCenter.x - width / 2),
-                      y: actionCenter.y - 91, width: width, height: 32)
+                      y: passCenter.y - 86, width: width, height: 32)
     }
 
     private func drawPower(_ power: KickPowerFeedback, in context: CGContext) {

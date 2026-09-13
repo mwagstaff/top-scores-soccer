@@ -18,10 +18,10 @@ final class FloatingJoystickTests: XCTestCase {
         XCTAssertNil(input.touchRole(at: CGPoint(x: 100, y: 957)))
         XCTAssertEqual(input.touchRole(at: CGPoint(x: 354, y: 868)), .action)
 
-        // Even in a narrow intermediate layout, the enlarged ACTION hit target
+        // Even in a narrow intermediate layout, the PASS hit target
         // takes precedence where it overlaps the left half of the surface.
         input.bounds.size.width = 260
-        XCTAssertEqual(input.touchRole(at: CGPoint(x: 125, y: 868)), .action)
+        XCTAssertEqual(input.touchRole(at: CGPoint(x: 125, y: 868)), .pass)
         XCTAssertFalse(input.beginMovement(at: CGPoint(x: 125, y: 868)))
     }
 

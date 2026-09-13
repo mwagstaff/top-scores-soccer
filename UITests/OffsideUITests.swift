@@ -25,7 +25,7 @@ final class OffsideUITests: XCTestCase {
         app.buttons["sandbox.resume"].tap()
         XCTAssertEqual(clock.label, stopped)
         check(action, "restart:offside;")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.12)
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         check(action, "kicks:2;")
         check(action, "restart:none;")
     }

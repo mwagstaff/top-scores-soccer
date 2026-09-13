@@ -39,11 +39,11 @@ final class PassPresentationTests: XCTestCase {
         scene.setMovement(.up)
         scene.refreshHUD()
         XCTAssertEqual(scene.simulation.passTargetID, 1)
-        XCTAssertEqual(hud.detail, "Tap to pass to #2 · Hold for power")
+        XCTAssertEqual(hud.detail, "PASS to #2 · Hold LONG BALL for power")
         scene.setMovement(Vector2(x: 1, y: 0))
         scene.refreshHUD()
         XCTAssertNil(scene.simulation.passTargetID)
-        XCTAssertEqual(hud.detail, "Tap into space · Hold for power")
+        XCTAssertEqual(hud.detail, "PASS into space · Hold LONG BALL for power")
     }
 
     func testSceneUsesReceiverFramingAndRestoresNormalScaleOnReset() throws {
@@ -78,7 +78,7 @@ final class PassPresentationTests: XCTestCase {
     private func passingScene() -> GameScene {
         let scene = GameScene(mode: .passing)
         scene.simulation.tuning.aiSpeedScale = 0
-        let positions = [Vector2.zero, Vector2(x: 0, y: 24), Vector2(x: -25, y: -25),
+        let positions = [Vector2.zero, Vector2(x: 0, y: 20), Vector2(x: -25, y: -25),
                          Vector2(x: 25, y: 35), Vector2(x: -25, y: 35), Vector2(x: 25, y: -25)]
         for id in scene.simulation.roster.indices {
             scene.simulation.roster[id].state = PlayerState(position: positions[id])

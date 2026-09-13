@@ -59,15 +59,14 @@ struct TuningView: View {
                 Section("Slides and first-time touches") {
                     Text("Aim and tap near a reachable high ball to head it. An early tap waits briefly for contact; holding in that situation keeps the header ready instead of sliding.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    tuningSlider("Hold to slide", key: \.slideHoldThreshold, range: 0.15...0.4, unit: "s", precision: 2)
                     tuningSlider("Slide recovery", key: \.slideRecovery, range: 0.5...1.5, unit: "s", precision: 2)
                     tuningSlider("Queued kick window", key: \.queuedPassDuration, range: 0.25...1.5, unit: "s", precision: 2)
                 }
                 Section("Shooting") {
-                    Text("Hold and release in defence for a high, long clearance. Near goal, the shot bar marks a green release band; holding into red can send it over the bar. Throw-ins and keeper throws use distance bars. Hold goal kicks to send them high and long.")
+                    Text("PASS always plays a short ball. The other button shoots inside shooting distance and plays a long ball outside it. Shots farther from goal need more power and have a narrower green band. Excess power reduces accuracy and can send the shot over the bar.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    tuningSlider("Tap / hold threshold", key: \.holdThreshold, range: 0.12...0.30, unit: "s", precision: 2)
-                    tuningSlider("Time to full power", key: \.fullChargeDuration, range: 0.35...1.0, unit: "s", precision: 2)
+                    tuningSlider("Shooting distance", key: \.shootingRange, range: 25...40, unit: "m", precision: 0)
+                    tuningSlider("Time to full shot power", key: \.shotChargeDuration, range: 0.5...1.4, unit: "s", precision: 2)
                     tuningSlider("Maximum shot speed", key: \.shotMaxSpeed, range: 32...62, unit: "m/s")
                 }
                 Section("Aftertouch") {

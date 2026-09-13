@@ -11,7 +11,7 @@ final class KeeperAndKickUITests: XCTestCase {
         assertValue(action, contains: "kicks:1;")
         XCTAssertTrue(action.isEnabled)
         attach(app, name: "Keeper holding an opposition ball")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let shortThrow = NSPredicate(format: "value CONTAINS %@ OR value CONTAINS %@ OR value CONTAINS %@",
                                      "kickKind:underarm throw;", "kickKind:overarm throw;", "kickKind:high throw;")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: shortThrow, object: action)], timeout: 5),
@@ -28,17 +28,20 @@ final class KeeperAndKickUITests: XCTestCase {
         attach(app, name: "Keeper held high long overarm throw")
     }
 
-    func testGoalKickTapTargetsReceiverAndHoldSendsHighLongKick() {
+    func testGoalKickTapTargetsReceiverAndHoldSendsHighLongKick() throws {
         let app = launch("--goal-kick")
         let action = element("sandbox.action", in: app)
         assertValue(action, contains: "restart:goalKick;")
         assertValue(action, contains: "restartReady:true;")
         assertValue(action, contains: "selectedKeeper:true;")
-        assertValue(action, contains: "target:0;")
         attach(app, name: "Goal kick — highlighted short outlet")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        let value = try XCTUnwrap(action.value as? String)
+        let targetField = try XCTUnwrap(value.split(separator: ";").first { $0.hasPrefix("shortTarget:") })
+        let target = try XCTUnwrap(Int(targetField.dropFirst("shortTarget:".count)),
+                                   "The goal kick must offer a highlighted short receiver")
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kickKind:goal kick pass;")
-        assertValue(action, contains: "selected:0;")
+        assertValue(action, contains: "selected:\(target);")
         assertValue(action, contains: "kicks:2;")
         attach(app, name: "Goal-kick pass — receiver now controlled")
 
@@ -49,7 +52,6 @@ final class KeeperAndKickUITests: XCTestCase {
         let origin = joystick.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
         origin.press(forDuration: 0.05, thenDragTo: origin.withOffset(CGVector(dx: 36, dy: -36)),
                      withVelocity: .fast, thenHoldForDuration: 0.12)
-        assertValue(action, contains: "target:1;")
         action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).press(forDuration: 0.85)
         assertValue(action, contains: "kickKind:long goal kick;")
         assertValue(action, contains: "kicks:2;")
@@ -70,7 +72,7 @@ final class KeeperAndKickUITests: XCTestCase {
         XCTAssertGreaterThan(after.y - before.y, 1)
         assertValue(action, contains: "selectedKeeper:true;")
         assertValue(action, contains: "keeperHands:false;")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kicks:2;")
         attach(app, name: "Keeper plays a backpass with his feet")
     }
@@ -105,7 +107,7 @@ final class KeeperAndKickUITests: XCTestCase {
                              file: StaticString = #filePath, line: UInt = #line) {
         let predicate = NSPredicate(format: "value CONTAINS %@", token)
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: predicate, object: element)], timeout: 5),
-                       .completed, "Expected \(token)", file: file, line: line)
+                       .completed, "Expected \(token), got \(String(describing: element.value))", file: file, line: line)
     }
 
     private func position(_ element: XCUIElement) throws -> CGPoint {

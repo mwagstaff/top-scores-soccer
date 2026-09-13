@@ -588,14 +588,15 @@ struct SandboxView: View {
     private var helpView: some View {
         NavigationStack {
             List {
-                Section("One stick. One button.") {
+                Section("One stick. Two buttons.") {
                     Label("Touch anywhere on the left side of the pitch, then drag to run and aim. Lift and touch again to place the joystick under your thumb.", systemImage: "hand.draw")
-                    Label("Aim towards a teammate and watch for the cyan brackets, then tap ACTION to pass. Near goal, a goalward tap shoots if there is no nearby pass. Elsewhere, aim into space for a runner to chase, or knock the ball ahead. Hold ACTION for a powerful kick.", systemImage: "arrow.up.right")
-                    Label("Hold ACTION, then release to send a high, long ball out of defence, including straight upfield. Hold longer for more height and distance. Near goal, aim towards the net for a shot: release in the green band for a strong finish. The red overhit region can send it over the bar.", systemImage: "scope")
-                    Label("When CROSS appears on the attacking wing, keep running and hold ACTION. Release in green to cross towards your runners in the box. A weak cross falls short; an overhit cross can sail past them. You do not need to turn the joystick towards the box.", systemImage: "arrow.turn.up.left")
-                    Label("Your attackers run to meet a cross. Tap ACTION as it reaches one to head towards goal automatically. Close contact and good timing improve the finish. For other aerial balls, aim the joystick and tap when HEAD appears.", systemImage: "soccerball")
-                    Label("For a moment after shooting, steer sideways to bend the ball. Your player coasts, then movement resumes.", systemImage: "arrow.turn.up.right")
-                    Label("Quickly pull the stick opposite your kick to chip the ball. The timing window is short; watch the ground shadow as it drops.", systemImage: "arrow.up.forward")
+                    Label("Press PASS for an immediate short ground pass towards the highlighted teammate. With no nearby option, play a short ball into space. Holding PASS never changes the kick.", systemImage: "arrow.up.right")
+                    Label("Within 35 metres of the opposition goal, SHOOT always attempts a shot, even when a teammate is nearby or you are facing away. Aim to influence placement. Tap for a quick finish, or hold and release for more power.", systemImage: "scope")
+                    Label("Watch the small meter beneath your player. Shots farther out need more power and have a narrower green release band. Too little power makes a weak attempt; too much adds height and reduces accuracy. Green indicates good power, not a guaranteed goal.", systemImage: "chart.bar")
+                    Label("Outside shooting range, LONG BALL sends a lofted ball in your chosen direction. Hold longer for greater distance. When CROSS appears on the wing, release in green to find runners in the box. Inside shooting range the button always shoots.", systemImage: "arrow.turn.up.left")
+                    Label("Off the ball, press BLOCK for a standing tackle or SLIDE for an immediate sliding tackle. A slide reaches farther but leaves you exposed while recovering. Release and press again for another challenge.", systemImage: "figure.soccer")
+                    Label("When HEAD appears, press to head towards goal or clear it upfield. HEAD PASS requests a directional header pass. Time the press as the ball reaches you. For incoming ground balls, PASS or SHOOT can prepare your next touch.", systemImage: "soccerball")
+                    Label("For a moment after shooting, steer sideways to bend the ball, or quickly pull opposite the kick to chip it. Your player coasts, then movement resumes.", systemImage: "arrow.turn.up.right")
                 }
                 Section(session.isClubMatch ? "Three-minute 11v11" : "Three-minute 5v5") {
                     Text("A coin toss decides your starting direction. Teams swap ends at half time. The kickoff message shows which goal you attack.")
@@ -606,14 +607,14 @@ struct SandboxView: View {
                          ? "Play two 90-second halves. Time lost to fouls, restarts and injuries appears as added time in each half. Dangerous attacks and attacking set pieces can finish before the whistle. Settings and pauses stop the clock. At full time, your result and the other matches in this matchweek save automatically. Tap Continue season to see the table. Leaving an unfinished match keeps the fixture unplayed."
                          : "Play two 90-second halves. Time lost to fouls, restarts and injuries appears as added time in each half. Dangerous attacks and attacking set pieces can finish before the whistle. Settings and pauses stop the clock. At full time, see the result and tap Play again for a fresh match.")
                     Text("Keepers have different shirts, gloves and a GK badge. They position themselves, dive and save automatically off the ball. When your keeper has the ball, the bright ring gives you control.")
-                    Text("After a goal, both teams return to their own half for the conceding side’s kickoff. The last touch decides who takes a throw-in, corner or goal kick. Aim your restarts with the joystick and use ACTION, including goal kicks. The opposition restarts automatically.")
+                    Text("After a goal, both teams return to their own half for the conceding side’s kickoff. The last touch decides who takes a throw-in, corner or goal kick. Aim your restarts with the joystick. Use PASS for a short option or the shooting button for a shot or long delivery. The opposition restarts automatically.")
                 }
                 Section("Keeper and throw-ins") {
-                    Text("With the ball in the keeper’s hands, aim at a teammate and tap ACTION. The keeper uses an underarm throw to a nearby player, an overarm throw farther away, and adds height when the route needs it. Cyan brackets show the intended teammate. Hold and release for a high, long overarm throw; the distance bar fills as you hold.")
-                    Text("For a goal kick, aim at a teammate and tap ACTION to pass from the ground. The keeper adds height when needed to reach the target. Hold and release for a high, long kick. You control the intended receiver as soon as the ball is released.")
+                    Text("With the ball in the keeper’s hands, aim at a teammate and press SHORT THROW. The keeper uses an underarm throw to a nearby player, an overarm throw farther away, and adds height when the route needs it. Cyan brackets show the intended teammate. Hold LONG THROW and release for a high, long overarm throw; the distance bar fills as you hold.")
+                    Text("For a goal kick, aim at a teammate and press PASS to pass from the ground. The keeper adds height when needed to reach the target. Hold LONG BALL and release for a high, long kick. You control the intended receiver as soon as the ball is released.")
                     Text("While the keeper holds the ball, both teams spread back into shape and opponents withdraw from the box. One teammate offers a short throw; take a moment to find the outlet.")
-                    Text("Pass back to your keeper to take control while the ball travels. A backpass stays at their feet: the keeper moves more slowly and can be tackled. Tap to pass or hold to kick it clear.")
-                    Text("For a throw-in, nearby teammates offer short options. Aim at the cyan brackets and tap ACTION for a short throw; hold and release to send it farther. The distance bar has no shot sweet spot or overhit penalty.")
+                    Text("Pass back to your keeper to take control while the ball travels. A backpass stays at their feet: the keeper moves more slowly and can be tackled. Press PASS or hold LONG BALL to kick it clear.")
+                    Text("For a throw-in, nearby teammates offer short options. Aim at the cyan brackets and press SHORT THROW for a short throw; hold LONG THROW and release to send it farther. The distance bar has no shot sweet spot or overhit penalty.")
                 }
                 Section("Playing as a team") {
                     Text(session.isClubMatch
@@ -623,15 +624,14 @@ struct SandboxView: View {
                     Text("Selection considers where the ball and its carrier are heading, so a player in a better position can take priority over the closest player. Clear changes of direction select quickly; a committed challenge or prepared kick stays with its player.")
                     Text("After an assisted pass, the yellow ring pulses around the player you now control. They follow your joystick immediately, even if you keep holding the passing direction. Centre or release the stick to let them meet the incoming ball. You can also prepare their next kick before it arrives.")
                     Text("Keep the ball moving with quick passes. Teammates offer nearby passing lanes and time forward runs into space. The passer moves into support, making it easier to pass again without stopping to dribble.")
-                    Text("Players run a little faster without the ball. To win possession, run into the ball from either side or meet the opponent head on. You do not need to press ACTION.")
-                    Text("The opponent shields the ball from behind. Stay close and keep pressing to win it, or run around to approach from the side. A short ACTION tap can prepare a kick or reinforce the same automatic player choice.")
-                    Text("When defending or chasing a loose ball, hold ACTION briefly to slide along your running direction. Reach farther, but allow time to recover if you miss. An incoming pass instead lets you prepare a kick.")
+                    Text("Players run a little faster without the ball. To win possession, run into the ball from either side or meet the opponent head on. Button tackles are also available: BLOCK stays on your feet and SLIDE lunges towards the ball.")
+                    Text("The opponent shields the ball from behind. Stay close and keep pressing to win it, or run around to approach from the side. Press BLOCK for a standing tackle or SLIDE for a committed sliding challenge.")
+                    Text("When defending or chasing a loose ball, press SLIDE to slide along your running direction. Reach farther, but allow time to recover if you miss. An incoming pass instead lets you prepare a kick.")
                     Text("Ball first is a clean challenge. A late slide shows the collision, fall and ground reaction before the whistle. Most players get back up before the restart. Occasionally a player is injured and must leave: choose an available squad replacement for your team; the opposition substitutes automatically. Injuries last for this match, including extra time. Yellow cards and rare reds follow the whistle; two yellows also mean a sending-off.")
-                    Text("At a free kick, one or two teammates offer a short pass and opponents stand at least ten yards back. Move the joystick to aim, then tap to the highlighted teammate or hold and release for power.")
-                    Text("A defending foul inside the penalty area awards a penalty. After the fall, whistle and recovery, take the kick from the penalty spot. Aim at goal and tap to shoot, or hold and release in the green band for more power. The goalkeeper tries to save it and play continues after the kick.")
+                    Text("At a free kick, one or two teammates offer a short pass and opponents stand at least ten yards back. Move the joystick to aim, then press PASS to the highlighted teammate or hold the shooting button and release for power.")
+                    Text("A defending foul inside the penalty area awards a penalty. After the fall, whistle and recovery, take the kick from the penalty spot. Aim at goal and tap SHOOT, or hold SHOOT and release in the green band for more power. The goalkeeper tries to save it and play continues after the kick.")
                     Text("The restart taker must wait for another player to touch the ball before playing it again. Touching it twice gives the opposition an indirect free kick.")
                     Text("Cyan brackets preview your pass target; the yellow ring identifies the player you control. The camera follows both the receiver and ball during a pass. A numbered edge arrow points to a receiver who moves beyond the view. Passes stay loose and opponents can intercept them.")
-                    Text("For a difficult backheel, move the stick forward during a short ACTION press, then sharply sweep it back just before releasing. Simply aiming backwards remains an ordinary pass. A pull-back after the kick is the separate chip gesture.")
                 }
                 Section("Timing runs and offside") {
                     Text("Cross from a wide position near the opposition box. Moving too early or too close to the goal line makes the delivery harder. Better midfielders and attackers cross more accurately; better strikers are stronger finishers with their heads. Position and timing still matter.")
@@ -641,9 +641,9 @@ struct SandboxView: View {
                 }
                 Section("Keep it in play") {
                     Text("For an aerial ball, watch its shadow and move into position. Tap as a cross arrives to head towards goal; aim the joystick for other headers. A slightly early tap can queue the header briefly, but a tap close to contact gives your best chance. The player jumps and you feel a light contact only when the header connects.")
-                    Text("Before an incoming ball reaches your feet, aim the next kick and tap to queue a pass, or hold and release to queue a powerful kick or shot. Your chosen direction and power are saved, so you can keep moving to meet the ball.")
-                    Text("A queued pass keeps its chosen teammate and aim while you move to meet the ball. A tap aimed into open space leads a reachable runner, or knocks ahead if nobody can reach it. You must make contact before the queue expires.")
-                    Text("Aim your queued pass into the pitch. Near a boundary, the player keeps a rescue touch in play; holding instead commits a slide to reach and clear the ball.")
+                    Text("Before an incoming ball reaches your feet, aim the next kick and press PASS to queue a pass, or hold SHOOT / LONG BALL and release to prepare a powerful kick. Your chosen direction and power are saved, so you can keep moving to meet the ball.")
+                    Text("A queued pass keeps its chosen teammate and aim while you move to meet the ball. A short pass into open space stays on the ground. You must make contact before the queue expires.")
+                    Text("Aim your queued pass into the pitch. Near a boundary, the player keeps a rescue touch in play; in ordinary off-ball play, press SLIDE to reach and clear the ball.")
                     Text("A queue belongs to that player and clears on a pause, foul or restart. It cannot pull a ball back after it has gone out.")
                 }
                 Section("Make it yours") {

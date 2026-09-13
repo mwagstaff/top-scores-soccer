@@ -33,6 +33,11 @@ struct PlayerState: Sendable {
 enum ExerciseMode: String, CaseIterable, Sendable { case solo, passing, match }
 enum Team: String, Sendable { case blue, red }
 
+enum PlayerActionButton: Sendable { case pass, shoot }
+
+/// Captured at button-down and carried through first-time receiving actions.
+enum HumanKickIntent: Sendable { case shortPass, shot, longBall, cross }
+
 /// Physical ends are separate from team identity and the scoreboard.
 struct MatchEnds: Equatable, Sendable {
     var blueAttacksNorth = true

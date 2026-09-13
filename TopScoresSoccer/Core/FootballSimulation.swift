@@ -268,6 +268,9 @@ struct FootballSimulation {
     private var switchCandidateElapsed = 0.0
     private var aiDecisionCountdown = 1.0
     private var actionWasTackle = false
+    private var actionButton: PlayerActionButton?
+    private var actionKickIntent: HumanKickIntent?
+    private var humanShotSequence = 0
     private var actionReceiving = false
     private var actionHeading = false
     private var actionHeaderOnPress = false
@@ -334,6 +337,7 @@ struct FootballSimulation {
         let aim: Vector2
         let heldFor: Double
         let passIntent: PassIntent?
+        let kickIntent: HumanKickIntent?
         var remaining: Double
     }
     private var queuedPass: QueuedPass?
@@ -387,6 +391,19 @@ struct FootballSimulation {
         if let target = activePassTargetID { return target }
         guard hasControl else { return nil }
         return quickPassTarget(from: selectedPlayerID, aim: intendedKickAim(for: selectedPlayerID))
+    }
+
+    /// The short-pass preview must not disappear just because a shot is available.
+    var shortPassTargetID: Int? {
+        if isHoldingGoalkeeper || matchRestart?.kind == .goalKick {
+            if actionDown, actionButton == .shoot { return currentDistributionChoice()?.targetID }
+            return distributionChoice(from: selectedPlayerID, aim: intendedKickAim(for: selectedPlayerID),
+                heldFor: 0, hands: isHoldingGoalkeeper, maximumDistance: tuning.shortPassRange).targetID
+        }
+        if actionDown, actionButton == .shoot { return actionKickIntent == .cross ? crossingOpportunity(for: actionActorID)?.receiverID : nil }
+        guard hasControl, matchRestart?.kind != .penalty, mode != .solo else { return passTargetID }
+        return choosePassTarget(from: selectedPlayerID, aim: intendedKickAim(for: selectedPlayerID),
+                                maximumDistance: tuning.shortPassRange)
     }
 
     var isControllingPassReceiver: Bool {
@@ -457,6 +474,7 @@ struct FootballSimulation {
     var queuedActionKind: String? {
         if queuedHeader != nil { return "header" }
         guard let queued = queuedPass else { return nil }
+        if let intent = queued.kickIntent { return intent == .shortPass ? "pass" : "shot" }
         return queued.heldFor >= tuning.holdThreshold ? "shot" : "pass"
     }
 
@@ -480,6 +498,30 @@ struct FootballSimulation {
 
     var canCross: Bool { hasControl && crossingOpportunity(for: selectedPlayerID) != nil }
 
+    /// All callers (button title, charge feedback and kick dispatch) use this decision.
+    var shootingButtonIntent: HumanKickIntent {
+        if actionDown, let actionKickIntent, actionButton == .shoot { return actionKickIntent }
+        return shootingIntent(for: selectedPlayerID)
+    }
+
+    private func shootingIntent(for actor: Int) -> HumanKickIntent {
+        if keeperHandsID == actor || matchRestart?.kind == .throwIn || matchRestart?.kind == .goalKick {
+            return .longBall
+        }
+        if matchRestart?.kind == .penalty { return .shot }
+        let goal = ends.direction(for: roster[actor].team) * (Pitch.length / 2)
+        let origin = possessionID == actor || mode == .solo ? ball.position : roster[actor].state.position
+        if (goal - origin).length <= max(1, tuning.shootingRange) { return .shot }
+        return crossingOpportunity(for: actor) != nil ? .cross : .longBall
+    }
+
+    private var distanceShotPower: KickMechanics.ShotPower? {
+        guard actionButton == .shoot, actionKickIntent == .shot, matchRestart?.kind != .penalty else { return nil }
+        let origin = actionReceiving ? roster[actionActorID].state.position : ball.position
+        let goal = ends.direction(for: roster[actionActorID].team) * (Pitch.length / 2)
+        return KickMechanics.distancePower(distance: (goal - origin).length, heldFor: actionElapsed, tuning: tuning)
+    }
+
     private func crossingExclusions(for actor: Int) -> Set<Int> {
         mode == .match ? OffsideRules.snapshot(actor: actor, ball: ball.position,
             roster: roster, restart: matchRestart?.kind, ends: ends)?.candidates ?? [] : []
@@ -494,34 +536,50 @@ struct FootballSimulation {
 
     var powerMeterKind: KickPowerKind? {
         guard actionDown, !actionCancelled, !actionWasTackle, !actionHeading else { return nil }
+        if actionButton == .pass { return nil }
         if isHoldingGoalkeeper { return .keeperDistribution }
         if matchRestart?.kind == .throwIn { return .throwIn }
         if matchRestart?.kind == .goalKick { return .longKick }
         if matchRestart?.kind == .penalty { return .shot }
+        if let actionKickIntent {
+            switch actionKickIntent {
+            case .shortPass: return nil
+            case .shot: return .shot
+            case .longBall: return .longKick
+            case .cross: return .cross
+            }
+        }
         if hasControl, crossingOpportunity(for: actionActorID) != nil { return .cross }
         return assistedShotDirection(from: actionActorID, aim: intendedKickAim(for: actionActorID)) != nil ? .shot : .longKick
     }
     var powerMeterFraction: Double {
         guard let kind = powerMeterKind else { return 0 }
-        if kind == .cross { return CrossingMechanics.meterFraction(heldFor: actionElapsed, tuning: tuning) }
+        if let profile = distanceShotPower { return profile.fraction }
+        if actionButton == .shoot, kind != .cross, kind != .shot {
+            return min(1, actionElapsed / max(0.15, tuning.fullChargeDuration))
+        }
+        if kind == .cross { return CrossingMechanics.meterFraction(heldFor: actionElapsed + (actionButton == .shoot ? tuning.holdThreshold : 0), tuning: tuning) }
         return kind == .shot ? KickMechanics.shotMeterFraction(heldFor: actionElapsed, tuning: tuning) : charge(for: actionElapsed)
     }
     var powerMeterSweetSpot: ClosedRange<Double>? {
+        if let profile = distanceShotPower { return profile.sweetSpot }
         if powerMeterKind == .cross { return CrossingMechanics.sweetSpot(tuning: tuning) }
         return powerMeterKind == .shot ? KickMechanics.shotSweetSpot(tuning: tuning) : nil
     }
     var powerMeterOverhitStart: Double? {
+        if let profile = distanceShotPower { return profile.overhitStart }
         if powerMeterKind == .cross { return CrossingMechanics.overhitStart(tuning: tuning) }
         return powerMeterKind == .shot ? KickMechanics.shotOverhitStart(tuning: tuning) : nil
     }
 
     var isOverchargingPower: Bool {
-        if powerMeterKind == .cross { return CrossingMechanics.isOverhit(heldFor: actionElapsed, tuning: tuning) }
+        if powerMeterKind == .cross { return CrossingMechanics.isOverhit(heldFor: actionElapsed + (actionButton == .shoot ? tuning.holdThreshold : 0), tuning: tuning) }
         return isOverchargingShot
     }
 
     var isOverchargingShot: Bool {
-        powerMeterKind == .shot && KickMechanics.isOverhit(heldFor: actionElapsed, tuning: tuning)
+        if let profile = distanceShotPower { return profile.isOverhit }
+        return powerMeterKind == .shot && KickMechanics.isOverhit(heldFor: actionElapsed, tuning: tuning)
     }
 
     var actionStatus: ActionStatus {
@@ -612,10 +670,13 @@ struct FootballSimulation {
         movementTimestamp = nil
     }
 
-    mutating func pressAction(timestamp: Double? = nil) {
+    mutating func pressAction(button: PlayerActionButton? = nil, timestamp: Double? = nil) {
         if mode == .match, freeKickReadyTeam != nil, freeKickReadyTeam != .blue { return }
         guard phase == .playing, !actionDown, !roster[selectedPlayerID].isUnavailable,
               !roster[selectedPlayerID].isGoalkeeper || isControllingGoalkeeper else { return }
+        guard button != .pass || matchRestart?.kind != .penalty else { return }
+        actionButton = button
+        actionKickIntent = nil
         earlyPassAdjustment = nil
         // Touching ACTION should recognise the same close pickup as the next simulation tick.
         if mode != .solo {
@@ -644,13 +705,17 @@ struct FootballSimulation {
             }
         }
         actionKickAim = intendedKickAim(for: selectedPlayerID)
+        if let button { actionKickIntent = button == .pass ? .shortPass : shootingIntent(for: selectedPlayerID) }
         if isHoldingGoalkeeper || (isTakingRestart && matchRestart?.kind == .goalKick) {
-            actionPassIntent = PassIntent(targetID: distributionChoice(from: selectedPlayerID,
-                aim: actionKickAim, heldFor: 0, hands: isHoldingGoalkeeper).targetID, aim: actionKickAim)
+            let target = button == .pass ? shortPassTargetID : distributionChoice(from: selectedPlayerID,
+                aim: actionKickAim, heldFor: 0, hands: isHoldingGoalkeeper).targetID
+            actionPassIntent = PassIntent(targetID: target, aim: actionKickAim)
         } else {
             actionPassIntent = mode != .solo && (hasControl || receiver != nil)
                 && matchRestart?.kind != .throwIn && matchRestart?.kind != .penalty
-                ? PassIntent(targetID: quickPassTarget(from: selectedPlayerID, aim: actionKickAim), aim: actionKickAim) : nil
+                ? PassIntent(targetID: button == .pass
+                    ? choosePassTarget(from: selectedPlayerID, aim: actionKickAim, maximumDistance: tuning.shortPassRange)
+                    : quickPassTarget(from: selectedPlayerID, aim: actionKickAim), aim: actionKickAim) : nil
         }
         actionTimestamp = timestamp?.isFinite == true ? timestamp : nil
         actionForward = player.facing
@@ -664,7 +729,7 @@ struct FootballSimulation {
         actionCommittedSlide = false
         actionReceiving = receiver != nil
         actionHeading = header != nil
-        actionHeaderOnPress = header.map { isAttackingCross(for: $0) } ?? false
+        actionHeaderOnPress = button == .pass ? false : header.map { isAttackingCross(for: $0) } ?? false
         actionReceivingRemaining = max(0.01, tuning.queuedPassDuration)
         actionWasTackle = !hasControl && !actionReceiving && !actionHeading
         actionAllowsManualSwitch = mode != .solo && actionWasTackle && !isTackling && freeKickReadyTeam == nil
@@ -676,6 +741,21 @@ struct FootballSimulation {
         if actionHeaderOnPress, !actionCancelled {
             armHeader(for: actionActorID, aim: actionKickAim, goalDirected: true)
         }
+        if let button, actionWasTackle, !actionCancelled {
+            actionAllowsManualSwitch = false
+            actionCommittedSlide = true // A single defensive press can never repeat or release a kick.
+            if button == .pass {
+                performStandingTackle(by: actionActorID)
+            } else {
+                let state = roster[actionActorID].state
+                let direction = validMovement.length > 0.001 ? validMovement.normalized : state.facing
+                if startTackle(id: actionActorID, direction: direction, kind: .slide) {
+                    slideCount += 1
+                    tackleCount += 1
+                }
+            }
+        }
+        if button == .pass { releaseAction(heldFor: 0) }
     }
 
     /// External touch timestamps take ownership of this press's clock; simulation steps then never add time twice.
@@ -697,7 +777,7 @@ struct FootballSimulation {
     }
 
     private mutating func commitHeldSlideIfNeeded() {
-        guard actionWasTackle, !actionCancelled, !actionCommittedSlide,
+        guard actionButton == nil, actionWasTackle, !actionCancelled, !actionCommittedSlide,
               actionElapsed >= tuning.slideHoldThreshold else { return }
         let state = roster[actionActorID].state
         let direction = state.velocity.length > 0.35 ? state.velocity.normalized : state.facing
@@ -712,6 +792,10 @@ struct FootballSimulation {
     /// Duration comes from touch timestamps, so a dropped render frame cannot change tap/hold classification.
     mutating func releaseAction(heldFor duration: Double) {
         guard actionDown else { return }
+        if actionButton != nil {
+            releaseButtonAction(heldFor: duration)
+            return
+        }
         if duration.isFinite, duration >= 0 {
             actionElapsed = max(actionElapsed, duration)
             commitHeldSlideIfNeeded()
@@ -771,9 +855,59 @@ struct FootballSimulation {
         performHumanKick(by: actor, aim: aim, heldFor: duration, backheel: backheel, passIntent: passIntent)
     }
 
+    private mutating func releaseButtonAction(heldFor duration: Double) {
+        let valid = duration.isFinite && duration >= 0
+        let actor = actionActorID
+        let button = actionButton
+        let intent = actionKickIntent
+        let aim = intendedKickAim(for: actor)
+        let pass = actionPassIntent
+        let receiving = actionReceiving
+        let heading = actionHeading
+        let headedOnPress = actionHeaderOnPress
+        let allowed = valid && !actionCancelled && !actionWasTackle && phase == .playing
+        let eligible = allowed && canKick && selectedPlayerID == actor
+        // The release event owns elapsed time; never add simulation time a second time.
+        let held = valid ? max(actionElapsed, duration) : 0
+        let specialHold = button == .pass ? 0 : held + tuning.holdThreshold
+        let distribution = eligible && (isHoldingGoalkeeper || matchRestart?.kind == .goalKick)
+            ? currentDistributionChoice(heldFor: specialHold) : nil
+        actionDown = false
+        actionButton = nil
+        actionKickIntent = nil
+        actionPassIntent = nil
+        actionElapsed = 0
+        actionWasTackle = false
+        actionCancelled = false
+        actionReceiving = false
+        actionHeading = false
+        actionHeaderOnPress = false
+        actionCommittedSlide = false
+        actionAllowsManualSwitch = false
+        actionStartedWithSelectionDirection = false
+        actionUsesTimestamps = false
+        guard allowed else { return }
+        if headedOnPress { return }
+        if heading {
+            armHeader(for: actor, aim: aim, goalDirected: button == .shoot && intent == .shot)
+            return
+        }
+        if let distribution {
+            releaseDistribution(by: actor, choice: distribution, heldFor: specialHold, human: true)
+            return
+        }
+        let kickDuration = matchRestart?.kind == .throwIn ? specialHold : (button == .pass ? 0 : held)
+        if eligible {
+            performHumanKick(by: actor, aim: aim, heldFor: kickDuration, passIntent: pass, kickIntent: intent)
+        } else if receiving {
+            _ = armQueuedKick(for: actor, aim: aim, heldFor: kickDuration, receiving: true,
+                              passIntent: pass, kickIntent: intent)
+        }
+    }
+
     private mutating func performHumanKick(by actor: Int, aim requested: Vector2, heldFor duration: Double,
                                           clearingBoundary: Bool = false, backheel: Bool = false,
-                                          passIntent: PassIntent? = nil) {
+                                          passIntent: PassIntent? = nil, kickIntent: HumanKickIntent? = nil) {
         guard !penaliseOffsideInvolvement(by: actor) else { return }
         if matchRestart?.kind == .penalty {
             launchPenalty(by: actor, aim: requested, heldFor: duration, human: true)
@@ -799,24 +933,33 @@ struct FootballSimulation {
             endAftertouch()
             return
         }
-        if !clearingBoundary, duration >= tuning.holdThreshold, crossingOpportunity(for: actor) != nil,
+        if (kickIntent == .cross || (kickIntent == nil && !clearingBoundary && duration >= tuning.holdThreshold)), crossingOpportunity(for: actor) != nil,
            let plan = CrossingMechanics.plan(origin: ball.position, crosser: roster[actor], roster: roster,
-                heldFor: duration, tuning: tuning, ends: ends, sequence: abilityKickSequence,
+                heldFor: duration + (kickIntent == .cross ? tuning.holdThreshold : 0), tuning: tuning, ends: ends, sequence: abilityKickSequence,
                 excludedReceiverIDs: crossingExclusions(for: actor)) {
             launchCross(by: actor, plan: plan, human: true)
             return
         }
         let tapAim = passIntent?.aim ?? requested
-        let quickShot = !backheel && duration < tuning.holdThreshold
+        let quickShot = kickIntent == nil && !backheel && duration < tuning.holdThreshold
             && shouldShootQuickTap(from: actor, aim: tapAim, target: passIntent?.targetID)
-        let isShot = duration >= tuning.holdThreshold || quickShot
+        let isShot = kickIntent.map { $0 != .shortPass } ?? (duration >= tuning.holdThreshold || quickShot)
         var aim = (quickShot ? tapAim : requested).normalized
         var lift = 0.0
         var landing: Vector2?
         let speed: Double
         if isShot {
             activePassTargetID = nil
-            if assistedShotDirection(from: actor, aim: aim) != nil,
+            if kickIntent == .shot,
+               let shot = KickMechanics.chargedShot(origin: ball.position, aim: aim,
+                    facing: roster[actor].state.facing, team: roster[actor].team,
+                    heldFor: duration, tuning: tuning, ends: ends, sequence: humanShotSequence) {
+                humanShotSequence += 1
+                aim = shot.direction
+                lift = shot.verticalVelocity
+                speed = shot.speed
+                lastKickKind = shot.isOverhit ? "overhit shot" : "shot"
+            } else if kickIntent == nil, assistedShotDirection(from: actor, aim: aim) != nil,
                let shot = KickMechanics.shot(origin: ball.position, aim: aim, team: roster[actor].team,
                                              heldFor: duration, tuning: tuning, ends: ends) {
                 aim = shot.direction
@@ -825,7 +968,7 @@ struct FootballSimulation {
                 lastKickKind = shot.isOverhit ? "overhit shot" : "shot"
             } else {
                 lastKickKind = "long kick"
-                let flight = KickMechanics.longKick(heldFor: duration, tuning: tuning)
+                let flight = KickMechanics.longKick(heldFor: duration + (kickIntent == nil ? 0 : tuning.holdThreshold), tuning: tuning)
                 speed = flight.speed
                 lift = flight.verticalVelocity
             }
@@ -843,12 +986,13 @@ struct FootballSimulation {
                         && (recoveryTimers[target] ?? 0) <= 0 ? target : nil
                 }
             } else {
-                activePassTargetID = mode != .solo ? choosePassTarget(from: actor, aim: aim) : nil
+                activePassTargetID = mode != .solo ? choosePassTarget(from: actor, aim: aim,
+                    maximumDistance: kickIntent == .shortPass ? tuning.shortPassRange : nil) : nil
             }
             var spacePoint = ball.position + aim * 14
             spacePoint.x = min(Pitch.width / 2 - 1, max(-Pitch.width / 2 + 1, spacePoint.x))
             spacePoint.y = min(Pitch.length / 2 - 1, max(-Pitch.length / 2 + 1, spacePoint.y))
-            let spaceRunner = !backheel && activePassTargetID == nil && mode != .solo
+            let spaceRunner = kickIntent != .shortPass && !backheel && activePassTargetID == nil && mode != .solo
                 ? throughBallRunner(from: actor, aim: aim, landing: spacePoint) : nil
             if let spaceRunner {
                 var point = spacePoint
@@ -867,7 +1011,7 @@ struct FootballSimulation {
                 lastKickKind = backheel ? "backheel" : "knock ahead"
             }
         }
-        if clearingBoundary { aim = clearanceDirection(aim) }
+        if clearingBoundary && kickIntent != .shot { aim = clearanceDirection(aim) }
         let footScale = roster[actor].isGoalkeeper ? tuning.keeperFootKickScale : 1
         kickBall(by: actor, aim: aim, speed: speed * footScale, isShot: isShot, human: true)
         ball.verticalVelocity = lift
@@ -957,7 +1101,7 @@ struct FootballSimulation {
     }
 
     private func distributionChoice(from actor: Int, aim: Vector2, heldFor duration: Double,
-                                    hands: Bool, captured: PassIntent? = nil) -> DistributionChoice {
+                                    hands: Bool, captured: PassIntent? = nil, maximumDistance: Double? = nil) -> DistributionChoice {
         let quality = KeeperDeliveryPlanner.ability(roster[actor].abilities)
         let held = duration >= tuning.holdThreshold
         let power = charge(for: duration)
@@ -969,6 +1113,7 @@ struct FootballSimulation {
             candidate.id != actor && candidate.team == roster[actor].team && !candidate.isGoalkeeper
                 && !candidate.isUnavailable && !candidate.isTackling && candidate.fallProgress <= 0.001
                 && (recoveryTimers[candidate.id] ?? 0) <= 0 && !offside.contains(candidate.id)
+                && (candidate.state.position - ball.position).length <= (maximumDistance ?? .infinity)
         }
         if let captured {
             if let id = captured.targetID, candidates.contains(where: { $0.id == id }) {
@@ -1074,6 +1219,8 @@ struct FootballSimulation {
 
     /// Used for touch cancellation, pause and interruption. This never releases a kick.
     mutating func cancelInput() {
+        actionButton = nil
+        actionKickIntent = nil
         earlyPassAdjustment = nil
         movement = .zero
         rearPressure.removeAll()
@@ -3166,7 +3313,7 @@ struct FootballSimulation {
         guard eligibleHeader(actor), ballIsStillInPlay(), !penaliseOffsideInvolvement(by: actor) else { return }
         let contactHeight = ball.height
         let speed = min(28, max(16, 14 + ball.velocity.length * 0.35))
-        let attacking = isAttackingCross(for: actor) && (!human || queuedHeader?.goalDirected == true)
+        let attacking = human ? queuedHeader?.goalDirected == true : isAttackingCross(for: actor)
         var contactPlayer = roster[actor]
         if let positions = offsideTouchPositions, positions.indices.contains(actor) {
             contactPlayer.state.position = positions[actor]
@@ -3180,7 +3327,7 @@ struct FootballSimulation {
         let goalDirection = (ends.direction(for: roster[actor].team) * (Pitch.length / 2) - ball.position).normalized
         let direction = finish?.direction ?? (attacking ? goalDirection : aim.normalized)
         roster[actor].state.facing = direction
-        kickBall(by: actor, aim: direction, speed: finish?.speed ?? speed, isShot: finish != nil, human: human)
+        kickBall(by: actor, aim: direction, speed: finish?.speed ?? speed, isShot: attacking, human: human)
         if let finish { ball.velocity = finish.direction * finish.speed }
         // A deliberate header is a new offside snapshot, but is not a foot backpass.
         handlingRestrictedTeam = nil
@@ -3223,7 +3370,7 @@ struct FootballSimulation {
     }
 
     private mutating func armQueuedKick(for actor: Int, aim: Vector2, heldFor duration: Double, receiving: Bool,
-                                       passIntent: PassIntent? = nil) -> Bool {
+                                       passIntent: PassIntent? = nil, kickIntent: HumanKickIntent? = nil) -> Bool {
         guard eligibleReceiver(actor), ballIsStillInPlay(),
               possessionID == nil || possessionID == actor else { return false }
         let state = roster[actor].state
@@ -3241,7 +3388,7 @@ struct FootballSimulation {
             guard distance <= tuning.queuedPassReach || (closingSpeed > 0 && estimatedArrival <= tuning.queuedPassDuration) else { return false }
         }
         queuedPass = QueuedPass(actorID: actor, aim: aim, heldFor: max(0, duration),
-                                passIntent: passIntent,
+                                passIntent: passIntent, kickIntent: kickIntent,
                                 remaining: max(0.01, tuning.queuedPassDuration))
         queuedPassCount += 1
         if distance <= tuning.queuedPassReach, ball.height <= tuning.airborneContactHeight {
@@ -3255,7 +3402,7 @@ struct FootballSimulation {
         guard !penaliseOffsideInvolvement(by: actor) else { return }
         queuedPass = nil
         performHumanKick(by: actor, aim: queued.aim, heldFor: queued.heldFor, clearingBoundary: true,
-                         passIntent: queued.passIntent)
+                         passIntent: queued.passIntent, kickIntent: queued.kickIntent)
         // Movement used to meet the arrival is not a fresh chip or curve command.
         kickInputBaseline = validMovement
     }

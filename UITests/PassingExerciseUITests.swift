@@ -24,7 +24,7 @@ final class PassingExerciseUITests: XCTestCase {
         // Reset immediately before the pass so active defenders cannot make the
         // initial possession depend on how long accessibility snapshots take.
         element("sandbox.reset", in: app).tap()
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(of: action, contains: "lastKick:pass")
         attachScreenshot(app, name: "Pass and defend exercise")
 

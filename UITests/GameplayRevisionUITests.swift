@@ -5,7 +5,7 @@ import UIKit
 /// discipline and the narrow chip gesture window have deterministic core tests.
 @MainActor
 final class GameplayRevisionUITests: XCTestCase {
-    func testOffBallTapDoesNotTackleAndHeldActionCommitsASingleSlide() throws {
+    func testSeparateBlockAndSlideButtonsCommitOnceAndResetClearsActions() throws {
         continueAfterFailure = false
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -18,14 +18,14 @@ final class GameplayRevisionUITests: XCTestCase {
 
         // Solo has no moving opponents, so the released ball remains away from
         // the stationary player while accessibility snapshots are collected.
-        center.tap()
+        app.buttons["sandbox.pass"].tap()
         assertValue(of: action, contains: "lastKick:pass")
         assertValue(of: action, contains: "kicks:1;")
         assertValue(of: action, contains: "chipWindow:0.00")
 
-        center.press(forDuration: 0.05)
+        app.buttons["sandbox.pass"].tap()
         assertValue(of: action, contains: "slides:0;")
-        assertValue(of: action, contains: "standing:0;")
+        assertValue(of: action, contains: "standing:1;")
         assertValue(of: action, contains: "kicks:1;")
 
         center.press(forDuration: 0.35)

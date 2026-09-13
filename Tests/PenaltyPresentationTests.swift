@@ -49,7 +49,7 @@ final class PenaltyPresentationTests: XCTestCase {
         XCTAssertEqual(scene.simulation.kickCount, kicks, "The pre-award release must not take the penalty.")
         XCTAssertEqual(whistles, 1)
         XCTAssertEqual(hud.status, "BLUE PENALTY")
-        XCTAssertTrue(hud.detail.contains("Tap to shoot"))
+        XCTAssertTrue(hud.detail.contains("Tap SHOOT"))
         XCTAssertEqual(scene.simulation.ball.position.x, 0, accuracy: 0.001)
         XCTAssertEqual(scene.simulation.ball.position.y, Pitch.length / 2 - 11, accuracy: 0.001)
         XCTAssertNil(scene.simulation.passTargetID)
@@ -75,7 +75,7 @@ final class PenaltyPresentationTests: XCTestCase {
             let action = try XCTUnwrap((input.accessibilityElements as? [UIAccessibilityElement])?
                 .first { $0.accessibilityIdentifier == "sandbox.action" })
             XCTAssertEqual(action.accessibilityLabel, "Take penalty")
-            XCTAssertTrue(action.accessibilityHint?.contains("Tap to shoot") == true)
+            XCTAssertTrue(action.accessibilityHint?.contains("Tap SHOOT") == true)
             let sweet = KickMechanics.shotSweetSpotDurations(tuning: scene.simulation.tuning)
             let duration = held ? (sweet.lowerBound + sweet.upperBound) / 2 : 0.08
             let before = scene.simulation.kickCount

@@ -30,6 +30,9 @@ final class PitchRenderer {
         let aim = SKShapeNode()
         let powerTrack = SKShapeNode(rectOf: CGSize(width: 2.8, height: 0.4), cornerRadius: 0.2)
         let powerFill = SKShapeNode()
+        let powerBand = SKShapeNode()
+        let powerDanger = SKShapeNode()
+        let powerMarker = SKShapeNode()
         let shadow = SKShapeNode(ellipseOf: CGSize(width: 1.85, height: 0.88))
         let tackle = SKShapeNode()
         let kickLeg = SKShapeNode()
@@ -118,7 +121,8 @@ final class PitchRenderer {
         debug: Bool,
         deltaTime: Double,
         controlledGoalkeeper: Bool = false,
-        holdingGoalkeeperID: Int? = nil
+        holdingGoalkeeperID: Int? = nil,
+        powerFeedback: KickPowerFeedback? = nil
     ) {
         let dt = min(max(deltaTime, 0), 0.05)
         if let lastSelectedPlayerID, lastSelectedPlayerID != selectedPlayerID, selectedPlayerID >= 0 {
@@ -277,11 +281,25 @@ final class PitchRenderer {
             sprite.tackle.isHidden = !footballer.isTackling || footballer.isSliding || fall > 0
             sprite.tackle.zRotation = CGFloat(atan2(player.facing.y, player.facing.x) - .pi / 2)
             let charge = selected && fall == 0 ? CGFloat(min(max(chargeFraction, 0), 1)) : 0
-            sprite.powerTrack.isHidden = charge <= 0
-            sprite.powerFill.isHidden = charge <= 0
-            if charge > 0 {
+            let showPower = selected && fall == 0 && (powerFeedback != nil || charge > 0)
+            sprite.powerTrack.isHidden = !showPower
+            sprite.powerFill.isHidden = !showPower
+            sprite.powerMarker.isHidden = !showPower
+            sprite.powerBand.isHidden = !showPower || powerFeedback?.sweetSpot == nil
+            sprite.powerDanger.isHidden = !showPower || powerFeedback?.overhitStart == nil
+            if showPower {
                 sprite.powerFill.path = drawingPath(CGPath(roundedRect: CGRect(x: -1.25, y: -1.92, width: max(0.03, 2.5 * charge), height: 0.2), cornerWidth: 0.1, cornerHeight: 0.1, transform: nil))
-                sprite.powerFill.fillColor = charge > 0.95 ? .white : yellow
+                sprite.powerFill.fillColor = powerFeedback?.tint ?? yellow
+                sprite.powerMarker.path = drawingPath(CGPath(rect: CGRect(x: -1.25 + 2.5 * charge - 0.035,
+                    y: -2.1, width: 0.07, height: 0.56), transform: nil))
+                if let band = powerFeedback?.sweetSpot {
+                    sprite.powerBand.path = drawingPath(CGPath(rect: CGRect(x: -1.25 + 2.5 * band.lowerBound,
+                        y: -2.02, width: 2.5 * (band.upperBound - band.lowerBound), height: 0.4), transform: nil))
+                }
+                if let danger = powerFeedback?.overhitStart {
+                    sprite.powerDanger.path = drawingPath(CGPath(rect: CGRect(x: -1.25 + 2.5 * danger,
+                        y: -1.98, width: 2.5 * (1 - danger), height: 0.32), transform: nil))
+                }
             }
         }
         let height = ball.height.isFinite ? max(0, ball.height) : 0
@@ -931,6 +949,20 @@ final class PitchRenderer {
         powerFill.zPosition = 1
         powerFill.isHidden = true
         playerNode.addChild(powerFill)
+        sprite.powerBand.fillColor = .clear
+        sprite.powerBand.strokeColor = SKColor(red: 0.47, green: 0.96, blue: 0.44, alpha: 1)
+        sprite.powerBand.lineWidth = 0.08
+        sprite.powerBand.zPosition = 2
+        sprite.powerDanger.fillColor = SKColor(red: 1, green: 0.36, blue: 0.30, alpha: 0.65)
+        sprite.powerDanger.strokeColor = .clear
+        sprite.powerDanger.zPosition = 0.5
+        sprite.powerMarker.fillColor = .white
+        sprite.powerMarker.strokeColor = .clear
+        sprite.powerMarker.zPosition = 3
+        for node in [sprite.powerBand, sprite.powerDanger, sprite.powerMarker] {
+            node.isHidden = true
+            playerNode.addChild(node)
+        }
 
         let tacklePath = CGMutablePath()
         tacklePath.addArc(center: .zero, radius: 1.72, startAngle: .pi * 0.18, endAngle: .pi * 0.82, clockwise: false)

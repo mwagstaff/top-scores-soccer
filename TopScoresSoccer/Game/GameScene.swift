@@ -59,7 +59,7 @@ struct SandboxHUD: Equatable {
     var southGoals = 0
     var attacksTopGoal = true
     var status = "BALL AT FEET"
-    var detail = "Tap to pass into space · Hold for power"
+    var detail = "PASS for a short ball · Hold SHOOT for power"
     var fps = 60
     var playerSpeed = 0.0
     var ballSpeed = 0.0
@@ -220,12 +220,13 @@ final class GameScene: SKScene {
                                   timestamp: timestamp)
     }
 
-    func pressAction(startedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+    func pressAction(button: PlayerActionButton? = nil, startedAt: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         guard !gameplayPaused, simulation.phase == .playing else { return }
         heldActionStartedAt = startedAt
         if hapticsEnabled { haptics.prepare() }
         let before = ImpactSnapshot(simulation)
-        simulation.pressAction(timestamp: startedAt)
+        simulation.pressAction(button: button, timestamp: startedAt)
+        if button == .pass { heldActionStartedAt = nil }
         playImpacts(since: before)
         updateControlFeedback()
         refreshHUD()
@@ -307,6 +308,11 @@ final class GameScene: SKScene {
         previousSelectedID = simulation.selectedPlayerID
     }
 
+    #if DEBUG
+    var debugChargePreviewPending = false
+    private var debugChargePreviewElapsed = 0.0
+    #endif
+
     override func update(_ currentTime: TimeInterval) {
         let elapsed = lastFrame.map { max(0, currentTime - $0) } ?? fixedStep
         lastFrame = currentTime
@@ -318,6 +324,17 @@ final class GameScene: SKScene {
             frameCount = 0
         }
         guard !gameplayPaused else { return }
+        #if DEBUG
+        if debugChargePreviewPending {
+            debugChargePreviewElapsed += elapsed
+            if debugChargePreviewElapsed > 0.6 {
+                debugChargePreviewPending = false
+                simulation.pressAction(button: .shoot)
+                let band = simulation.powerMeterSweetSpot ?? 0.4...0.6
+                simulation.updateActionHold(heldFor: (band.lowerBound + band.upperBound) / 2 * simulation.tuning.shotChargeDuration)
+            }
+        }
+        #endif
         if let startedAt = heldActionStartedAt {
             simulation.updateActionHold(heldFor: max(0, ProcessInfo.processInfo.systemUptime - startedAt))
         }
@@ -436,14 +453,15 @@ final class GameScene: SKScene {
             return interpolated
         }
         pitch.render(footballers: footballers, selectedPlayerID: simulation.selectedPlayerID,
-                     passTargetID: simulation.passTargetID,
+                     passTargetID: simulation.shortPassTargetID,
                      ball: ball, hasControl: simulation.hasControl,
                      chargeFraction: powerFeedback?.fraction ?? simulation.chargeFraction,
                      aftertouchRemaining: simulation.aftertouchRemaining,
                      aftertouchVector: simulation.aftertouchVector,
                      debug: debugEnabled, deltaTime: deltaTime,
                      controlledGoalkeeper: simulation.isControllingGoalkeeper,
-                     holdingGoalkeeperID: simulation.goalkeeperHoldingID)
+                     holdingGoalkeeperID: simulation.goalkeeperHoldingID,
+                     powerFeedback: powerFeedback)
         var cameraBall = ball
         if simulation.phase != .playing,
            let fallen = footballers.first(where: { $0.fallProgress > 0 }) {
@@ -588,7 +606,7 @@ final class GameScene: SKScene {
         hud.injuredPlayer = simulation.pendingInjuryID.flatMap { simulation.roster[$0].clubPlayer }
         hud.injuryReplacements = simulation.injuryReplacements
         hud.selectedPlayerID = simulation.selectedPlayerID
-        hud.passTargetID = simulation.passTargetID
+        hud.passTargetID = simulation.shortPassTargetID
         hud.possession = simulation.possessionTeam.map(sideName) ?? "Loose"
         hud.tackles = simulation.tackleCount + simulation.runningChallengeCount
         hud.switches = simulation.switchCount
@@ -659,7 +677,7 @@ final class GameScene: SKScene {
                 if let restart = simulation.matchRestart, simulation.isTakingRestart {
                     hud.status = "\(sideName(restart.team).uppercased()) \(restart.kind.title.uppercased())"
                     let automatic = restart.team == .red
-                    let targetNumber = simulation.passTargetID.map {
+                    let targetNumber = simulation.shortPassTargetID.map {
                         simulation.roster[$0].clubPlayer?.jerseyNumber ?? $0 + 1
                     }
                     switch restart.kind {
@@ -694,7 +712,7 @@ final class GameScene: SKScene {
                 } else if let keeperTeam = simulation.goalkeeperPossessionTeam {
                     hud.status = "\(sideName(keeperTeam).uppercased()) KEEPER HAS IT"
                     if keeperTeam == .blue {
-                        let targetNumber = simulation.passTargetID.map {
+                        let targetNumber = simulation.shortPassTargetID.map {
                             simulation.roster[$0].clubPlayer?.jerseyNumber ?? $0 + 1
                         }
                         hud.detail = targetNumber.map { "Tap to throw to #\($0) · Hold for a high throw" }
@@ -707,7 +725,7 @@ final class GameScene: SKScene {
                     hud.status = simulation.isControllingPassReceiver ? "KEEPER RECEIVING" : "KEEPER AT FEET"
                     hud.detail = simulation.isControllingPassReceiver
                         ? "Move to meet the backpass · Then pass or kick"
-                        : "Keeper is vulnerable · Tap to pass or hold to kick"
+                        : "PASS for a short ball · LONG BALL to clear"
                 } else if let queued = simulation.queuedActionKind {
                     hud.status = queued == "header" ? "HEADER QUEUED" : queued == "shot" ? "POWER KICK QUEUED" : "NEXT TOUCH QUEUED"
                     hud.detail = queued == "header"
@@ -718,12 +736,12 @@ final class GameScene: SKScene {
                     hud.status = "PREPARE HEADER"
                     hud.detail = simulation.isCrossInFlight && simulation.lastTouchTeam == .blue
                         ? "Jump timed · Move to meet the cross"
-                        : "Aim the stick · Release ACTION to meet the ball"
+                        : "Aim the stick · Release SHOOT to meet the ball"
                 } else if simulation.headingPlayerID != nil {
                     hud.status = "HEAD IT"
                     hud.detail = simulation.isCrossInFlight && simulation.lastTouchTeam == .blue
                         ? "Tap as the cross arrives · Header aims towards goal"
-                        : "Aim the stick · Tap ACTION as the ball reaches you"
+                        : "Aim the stick · Press SHOOT as the ball reaches you"
                 } else if simulation.isCrossInFlight && simulation.lastTouchTeam == .blue {
                     hud.status = "MEET THE CROSS"
                     hud.detail = "Runners attack the box · Tap as the ball reaches you"
@@ -732,7 +750,7 @@ final class GameScene: SKScene {
                     hud.detail = "Committed to the challenge · Ball first"
                 } else if simulation.isTakingFreeKick {
                     hud.status = "\(hud.homeName.uppercased()) FREE KICK"
-                    hud.detail = simulation.passTargetID.map {
+                    hud.detail = simulation.shortPassTargetID.map {
                         "Tap to pass to #\(simulation.roster[$0].clubPlayer?.jerseyNumber ?? $0 + 1) · Hold for power"
                     } ?? "Aim at a nearby teammate · Tap for a short pass"
                 } else if simulation.isPreparingReceivingKick {
@@ -753,9 +771,9 @@ final class GameScene: SKScene {
                 } else if simulation.ball.height > 0.2 {
                     hud.status = "BALL IN THE AIR"
                     hud.detail = "Watch the shadow for the landing spot"
-                } else if simulation.canCross {
+                } else if simulation.canCross && simulation.shootingButtonIntent == .cross {
                     hud.status = "CROSS AVAILABLE"
-                    hud.detail = "Hold ACTION · Release in green to find your runners"
+                    hud.detail = "Hold CROSS · Release in green to find your runners"
                 } else if simulation.actionStatus == .charging {
                     hud.status = "CHARGING"
                     hud.detail = "Aim towards goal to shoot · Release to strike"
@@ -767,13 +785,13 @@ final class GameScene: SKScene {
                     hud.detail = "A missed tackle leaves you exposed"
                 } else if simulation.hasControl {
                     hud.status = "BALL AT FEET"
-                    if let target = simulation.passTargetID {
+                    if let target = simulation.shortPassTargetID {
                         let number = simulation.roster[target].clubPlayer?.jerseyNumber ?? target + 1
                         hud.detail = "Tap to pass to #\(number) · Hold for power"
                     } else if simulation.quickTapWillShoot {
-                        hud.detail = "Tap to shoot · Hold for power"
+                        hud.detail = "PASS for a short ball · Hold SHOOT for power"
                     } else {
-                        hud.detail = "Tap into space · Hold for power"
+                        hud.detail = "PASS into space · Hold LONG BALL for distance"
                     }
                 } else if simulation.isPressingFromBehind {
                     hud.status = "KEEP PRESSING"
@@ -781,11 +799,33 @@ final class GameScene: SKScene {
                 } else if simulation.mode != .solo {
                     hud.status = simulation.possessionTeam == .red ? "WIN IT BACK" : "MEET THE BALL"
                     hud.detail = simulation.possessionTeam == .red
-                        ? "Steer to select and close down · Hold to slide"
+                        ? "Steer to select · BLOCK or SLIDE to tackle"
                         : "Steer to select and meet the ball · Tap to prepare"
                 } else {
                     hud.status = "CHASE IT DOWN"
-                    hud.detail = "Tap to queue a pass · Hold to slide for the ball"
+                    hud.detail = "BLOCK to tackle · SLIDE to reach farther"
+                }
+            }
+        }
+        if simulation.phase == .playing, simulation.possessionTeam == .blue,
+           simulation.queuedActionKind == nil, !simulation.isPreparingHeader {
+            if simulation.isHoldingGoalkeeper || simulation.matchRestart?.kind == .throwIn {
+                hud.detail = "SHORT THROW to a teammate · Hold LONG THROW for distance"
+            } else if simulation.matchRestart?.kind == .goalKick {
+                hud.detail = "PASS to a nearby teammate · Hold LONG BALL for distance"
+            } else if simulation.isTakingPenalty {
+                hud.detail = "Aim at goal · Tap SHOOT or hold for power"
+            } else if simulation.hasControl {
+                let kick = simulation.shootingButtonIntent == .shot ? "SHOOT" : simulation.shootingButtonIntent == .cross ? "CROSS" : "LONG BALL"
+                let pass = simulation.shortPassTargetID.map {
+                    "PASS to #\(simulation.roster[$0].clubPlayer?.jerseyNumber ?? $0 + 1)"
+                } ?? "PASS into space"
+                hud.detail = "\(pass) · Hold \(kick) for power"
+                if simulation.matchRestart?.kind == .kickoff {
+                    hud.detail += " · You attack the \(hud.attacksTopGoal ? "top" : "bottom") goal"
+                }
+                if simulation.matchRestart?.kind == .offside || simulation.matchRestart?.kind == .indirectFreeKick {
+                    hud.detail = "Indirect kick · PASS to a teammate · Another player must touch before a goal"
                 }
             }
         }

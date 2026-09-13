@@ -16,7 +16,7 @@ final class MatchUITests: XCTestCase {
         XCTAssertEqual(clock.label, "1st half, time remaining 1:30")
         waitForKickoff(in: app)
         attach(app, name: "5v5 kickoff and match clock")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         assertValue(action, contains: "kicks:1;")
         let clockRunning = NSPredicate(format: "label != %@", "1st half, time remaining 1:30")
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: clockRunning, object: clock)], timeout: 5), .completed)
@@ -54,7 +54,7 @@ final class MatchUITests: XCTestCase {
         let action = element("sandbox.action", in: app)
         assertValue(action, contains: "attacksTopGoal:\(north);")
         XCTAssertTrue(element("match.team-counts", in: app).label.hasSuffix(north ? "↑" : "↓"))
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let secondHalf = app.buttons["match.second-half"]
         XCTAssertTrue(secondHalf.waitForExistence(timeout: 10))
         XCTAssertEqual(element("match.half-time-direction", in: app).label,

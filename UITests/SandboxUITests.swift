@@ -62,7 +62,7 @@ final class SandboxUITests: XCTestCase {
         let buttonCenter = action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
 
         // Coordinates exercise UIView touch delivery and event timing, including lift.
-        buttonCenter.tap()
+        app.buttons["sandbox.pass"].tap()
         assertValue(of: action, contains: "lastKick:pass")
         attachScreenshot(app, name: "Tap pass")
 

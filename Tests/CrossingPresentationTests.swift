@@ -17,15 +17,15 @@ final class CrossingPresentationTests: XCTestCase {
             let action = try element("sandbox.action", in: input)
             XCTAssertEqual(action.accessibilityLabel, "Cross ball")
             XCTAssertTrue(action.accessibilityHint?.contains("automatically") == true)
-            XCTAssertTrue(action.accessibilityHint?.contains("short tap still passes") == true)
+            XCTAssertTrue(action.accessibilityHint?.contains("Press PASS") == true)
 
-            scene.pressAction(startedAt: 100)
-            scene.simulation.updateActionHold(heldFor: 0.3)
+            scene.pressAction(button: .shoot, startedAt: 100)
+            scene.simulation.updateActionHold(heldFor: 0.04)
             refresh(input, scene: scene)
             XCTAssertEqual(scene.powerFeedback?.kind, .cross)
             XCTAssertTrue(try element("sandbox.power", in: input).accessibilityValue?.contains("falls short") == true)
 
-            scene.simulation.updateActionHold(heldFor: 0.75)
+            scene.simulation.updateActionHold(heldFor: 0.49)
             refresh(input, scene: scene)
             let sweet = try XCTUnwrap(scene.powerFeedback)
             XCTAssertTrue(sweet.isSweet)
@@ -62,8 +62,8 @@ final class CrossingPresentationTests: XCTestCase {
         var hud = SandboxHUD()
         var impacts: [GameplayHaptic] = []
         scene.onHUDUpdate = { hud = $0 }
-        scene.pressAction()
-        scene.releaseAction(heldFor: 0.75)
+        scene.pressAction(button: .shoot)
+        scene.releaseAction(heldFor: 0.49)
         XCTAssertTrue(scene.simulation.isCrossInFlight)
         XCTAssertNotEqual(scene.simulation.selectedPlayerID, 0)
         refresh(input, scene: scene)
@@ -81,7 +81,7 @@ final class CrossingPresentationTests: XCTestCase {
         XCTAssertTrue(hud.detail.contains("towards goal"))
         XCTAssertFalse(hud.detail.contains("Aim the stick"))
         scene.onHaptic = { impacts.append($0) }
-        scene.pressAction()
+        scene.pressAction(button: .shoot)
         XCTAssertEqual(scene.simulation.headerCount, 1)
         XCTAssertEqual(impacts, [.pass], "A header connecting on button-down gives immediate feedback.")
         scene.releaseAction(heldFor: 0.08)
@@ -99,26 +99,26 @@ final class CrossingPresentationTests: XCTestCase {
         scene.simulation.ball.position = scene.simulation.player.position + .up * 1.25
         refresh(input, scene: scene)
         XCTAssertFalse(scene.simulation.canCross)
-        XCTAssertEqual(try element("sandbox.action", in: input).accessibilityLabel, "Action")
+        XCTAssertEqual(try element("sandbox.action", in: input).accessibilityLabel, "Shoot")
         XCTAssertNotEqual(input.actionTitle, "CROSS")
 
-        scene.simulation.player.position = Vector2(x: 26, y: 32)
+        scene.simulation.player.position = Vector2(x: 26, y: 24)
         scene.simulation.ball.position = scene.simulation.player.position + .up * 1.25
-        scene.pressAction()
-        scene.simulation.updateActionHold(heldFor: 0.75)
+        scene.pressAction(button: .shoot)
+        scene.simulation.updateActionHold(heldFor: 0.49)
         XCTAssertEqual(scene.powerFeedback?.kind, .cross)
         scene.setGameplayPaused(true)
         refresh(input, scene: scene)
         XCTAssertNil(scene.powerFeedback)
         scene.setGameplayPaused(false)
-        scene.releaseAction(heldFor: 0.75)
+        scene.releaseAction(heldFor: 0.49)
         XCTAssertEqual(scene.simulation.crossCount, 0)
     }
 
     private func crossingScene() -> GameScene {
         let scene = GameScene(mode: .passing)
         scene.simulation.tuning.aiSpeedScale = 0
-        scene.simulation.player = PlayerState(position: Vector2(x: 26, y: 32), velocity: .up * 4, facing: .up)
+        scene.simulation.player = PlayerState(position: Vector2(x: 26, y: 24), velocity: .up * 4, facing: .up)
         scene.simulation.ball.position = scene.simulation.player.position + .up * 1.25
         scene.simulation.roster[1].state = PlayerState(position: Vector2(x: 0, y: 42))
         scene.simulation.roster[2].state = PlayerState(position: Vector2(x: -10, y: 40))

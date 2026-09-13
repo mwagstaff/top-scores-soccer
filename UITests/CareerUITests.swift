@@ -230,7 +230,7 @@ final class CareerUITests: XCTestCase {
         assertValue(action, contains: "players:22;")
         XCTAssertTrue(element("match.selected-player", in: app).label.contains(controlledClubName))
         assertValue(action, contains: "restartReady:true;")
-        action.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        app.buttons["sandbox.pass"].coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
         let secondHalf = element("match.second-half", in: app)
         XCTAssertTrue(secondHalf.waitForExistence(timeout: 10))
         secondHalf.tap()

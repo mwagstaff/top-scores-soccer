@@ -18,6 +18,9 @@ struct GameplayTuning: Equatable, Sendable {
     var shotAssistRange = 140.0         // m, covers the whole practice pitch for goal-directed holds
     var shotMinSpeed = 25.0             // m/s
     var shotMaxSpeed = 47.0             // m/s
+    var shootingRange = 35.0           // m from goal centre, independent of facing and teammates
+    var shortPassRange = 22.0          // m; the dedicated pass button never selects a long outlet
+    var shotChargeDuration = 0.95      // seconds from button-down to full power
     var joystickDeadZone = 0.12         // fraction of joystick radius
     var holdThreshold = 0.26            // seconds; forgiving short releases pass
     var fullChargeDuration = 0.65       // seconds beyond the hold threshold

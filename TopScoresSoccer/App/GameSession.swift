@@ -180,6 +180,13 @@ final class GameSession {
             scene.simulation.ball.position = Vector2(x: 0, y: 33.25)
             return
         }
+        #if DEBUG
+        if arguments.contains("--split-power-preview"), mode == .solo {
+            scene.simulation.player.position = Vector2(x: 0, y: 25)
+            scene.simulation.ball.position = Vector2(x: 0, y: 26.25)
+            scene.debugChargePreviewPending = true
+        }
+        #endif
         let hands = arguments.contains("--keeper-hands")
         let feet = arguments.contains("--keeper-feet")
         let throwIn = arguments.contains("--throw-in")
@@ -211,8 +218,8 @@ final class GameSession {
             for _ in 0..<120 where scene.simulation.phase != .playing {
                 scene.simulation.step(dt: 1.0 / 60)
             }
-            scene.simulation.roster[0].state = PlayerState(position: Vector2(x: 0, y: -26))
-            scene.simulation.roster[1].state = PlayerState(position: Vector2(x: 12, y: -34))
+            scene.simulation.roster[0].state = PlayerState(position: scene.simulation.ball.position + .up * 8)
+            scene.simulation.roster[1].state = PlayerState(position: scene.simulation.ball.position + Vector2(x: 12, y: 14))
             scene.simulation.cancelInput()
         } else if throwIn {
             scene.simulation.roster[0].state.position = Vector2(x: 24, y: -10)
