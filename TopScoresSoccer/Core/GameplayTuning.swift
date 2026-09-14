@@ -31,10 +31,10 @@ struct GameplayTuning: Equatable, Sendable {
     var controlRelativeSpeed = 18.0     // m/s, acquisition limit
     var kickReach = 3.4                 // m, covers ordinary dribble gaps
     var reacquisitionDelay = 0.28       // seconds after striking the ball
-    var aftertouchDuration = 0.65       // seconds
-    var aftertouchStrength = 2.4        // radians/s at full lateral stick before decay
-    var aftertouchDecay = 2.0           // unitless exponent; higher values fade curve sooner
-    var aftertouchMaxAngle = 25.0       // degrees from initial shot direction
+    var aftertouchDuration = 0.70       // seconds of diminishing directional influence
+    var aftertouchStrength = 0.72       // radians/s at full lateral stick before decay
+    var aftertouchDecay = 1.7           // unitless exponent; higher values fade curve sooner
+    var aftertouchMaxAngle = 9.0        // realistic cap from the initial shot direction
     var cameraSmoothing = 9.0           // response rate, 1/s
     var cameraLookAhead = 0.28          // seconds of ball velocity
     var restartDelay = 1.1              // seconds of goal/out feedback

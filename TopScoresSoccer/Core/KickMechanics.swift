@@ -17,8 +17,11 @@ enum KickMechanics {
         let fraction = bounded(heldFor, fallback: 0, minimum: 0, maximum: 10) / duration
         let range = bounded(tuning.shootingRange, fallback: 35, minimum: 20, maximum: 50)
         let reach = min(1, distance / range)
-        let centre = 0.10 + 0.68 * pow(reach, 0.9)
-        let halfWidth = 0.17 - 0.10 * reach
+        // A useful finish is a firm strike even from close range. Distance asks for more
+        // power and tighter timing, while still leaving a little safety before the overhit
+        // region. This profile drives both the visible meter and the physical launch.
+        let centre = 0.56 + 0.27 * pow(reach, 0.85)
+        let halfWidth = 0.14 - 0.07 * reach
         let band = max(0, centre - halfWidth)...min(0.9, centre + halfWidth)
         return ShotPower(fraction: min(1, fraction), sweetSpot: band,
                          overhitStart: min(0.97, band.upperBound + 0.08))
@@ -49,12 +52,21 @@ enum KickMechanics {
         let needed = (profile.sweetSpot.lowerBound + profile.sweetSpot.upperBound) / 2
         let referenceSpeed = 12 + (bounded(tuning.shotMaxSpeed, fallback: 47, minimum: 25, maximum: 65) - 12) * max(power, needed)
         let flightTime = max(0.04, (target - origin).length / referenceSpeed)
-        let height = 0.15 + 1.15 * power + 3.5 * excess
+        let height = 0.12 + 1.20 * power + 3.8 * pow(excess, 1.25)
         let gravity = bounded(tuning.ballGravity, fallback: 18, minimum: 0.1, maximum: 80)
         let lift = power < 0.08 ? 0 : min(28, height / flightTime + 0.5 * gravity * flightTime)
         let awkward = (1 - facing.normalized.dot(goalward)) * 0.5
-        let spread = 0.003 + pow(min(1.5, distance / 35), 2) * 0.038
-            + power * power * 0.015 + excess * 0.085 + awkward * 0.022
+        // Distance and poor timing widen the real launch angle. A well-powered shot is
+        // therefore the cleanest strike; raw power is not itself an accuracy penalty until
+        // the player enters the overhit region.
+        let shootingRange = bounded(tuning.shootingRange, fallback: 35, minimum: 20, maximum: 50)
+        let distanceSpread = pow(min(1.35, distance / shootingRange), 1.7) * 0.020
+        let underPower = max(0, profile.sweetSpot.lowerBound - power)
+            / max(0.1, profile.sweetSpot.lowerBound)
+        let aboveBand = max(0, power - profile.sweetSpot.upperBound)
+            / max(0.1, 1 - profile.sweetSpot.upperBound)
+        let timingSpread = pow(underPower, 1.4) * 0.010 + pow(aboveBand, 1.3) * 0.022
+        let spread = 0.0025 + distanceSpread + timingSpread + excess * 0.070 + awkward * 0.022
         let error = sin(Double(sequence + 1) * 2.399963229728653) * spread
         return Shot(direction: (target - origin).normalized.rotated(by: error), speed: speed,
                     verticalVelocity: lift, isOverhit: profile.isOverhit)

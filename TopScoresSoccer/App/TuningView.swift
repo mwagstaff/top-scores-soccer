@@ -70,10 +70,12 @@ struct TuningView: View {
                     tuningSlider("Maximum shot speed", key: \.shotMaxSpeed, range: 32...62, unit: "m/s")
                 }
                 Section("Aftertouch") {
+                    Text("After shooting, steer sideways briefly to bend the ball. The influence fades in flight and cannot turn a badly aimed strike into an impossible curve.")
+                        .font(.footnote).foregroundStyle(.secondary)
                     tuningSlider("Curve window", key: \.aftertouchDuration, range: 0.4...1.0, unit: "s", precision: 2)
-                    tuningSlider("Curve strength", key: \.aftertouchStrength, range: 0.6...4.0, unit: "rad/s")
+                    tuningSlider("Curve strength", key: \.aftertouchStrength, range: 0.3...1.5, unit: "rad/s")
                     tuningSlider("Curve fade", key: \.aftertouchDecay, range: 1...4, unit: "")
-                    tuningSlider("Maximum bend", key: \.aftertouchMaxAngle, range: 10...40, unit: "°", precision: 0)
+                    tuningSlider("Maximum bend", key: \.aftertouchMaxAngle, range: 4...16, unit: "°", precision: 0)
                 }
                 Section("Chipping") {
                     tuningSlider("Pull-back window", key: \.chipWindowDuration, range: 0.12...0.4, unit: "s", precision: 2)

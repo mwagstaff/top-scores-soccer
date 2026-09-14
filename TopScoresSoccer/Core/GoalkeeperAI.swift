@@ -79,6 +79,23 @@ enum GoalkeeperAI {
         return ContactProfile(reach: configuration.standingReach, maximumHeight: configuration.standingSaveHeight)
     }
 
+    static func effectiveSaveReach(ball: BallState, team: Team, state: State,
+                                   configuration: Configuration = .defaults) -> Double {
+        let reach = contactProfile(state: state, configuration: configuration).reach
+        guard ball.mode == .shot else { return reach }
+        let postLimit = Pitch.goalWidth / 2 - Pitch.ballRadius
+        let ownGoalY = -configuration.ends.attackSign(for: team) * Pitch.length / 2
+        let lineTime = abs(ball.velocity.y) > 0.001
+            ? (ownGoalY - ball.position.y) / ball.velocity.y : -1
+        let goalLineX = lineTime >= 0
+            ? ball.position.x + ball.velocity.x * lineTime : ball.position.x
+        let widthFraction = abs(goalLineX) / max(0.1, postLimit)
+        // The central 45% keeps the ordinary physical reach. Only genuinely post-bound
+        // placement tapers the useful contact area, increasingly toward the corner.
+        let postProximity = min(1, max(0, (widthFraction - 0.45) / 0.55))
+        return reach * (1 - 0.25 * pow(postProximity, 2))
+    }
+
     /// Pose extent, not an animation clock: spread out during the dive, then get upright.
     private static func divePoseExtent(state: State, configuration: Configuration) -> Double {
         if state.diveRemaining > 0 {
@@ -101,6 +118,7 @@ enum GoalkeeperAI {
         }
         state.diveRemaining = max(0, state.diveRemaining - dt)
         state.recoveryRemaining = max(0, state.recoveryRemaining - dt)
+        let goalwardShot = ball.mode == .shot && ball.velocity.y * attack < -5
         if ownsBall {
             state.diveRemaining = 0
             state.holdingElapsed += dt
@@ -120,6 +138,26 @@ enum GoalkeeperAI {
         let trackingX = ball.position.x * positioningDepth / max(positioningDepth, ballDepth)
         var target = Vector2(x: min(Pitch.goalWidth / 2, max(-Pitch.goalWidth / 2, trackingX)),
                              y: goalY + attack * positioningDepth)
+
+        // A keeper has time to set behind a distant, straight goal-bound shot. Predict only
+        // from its current velocity: late aftertouch changes that line and can still wrong-foot
+        // the keeper. Close shots provide too little travel time for this positioning to become
+        // a disguised teleport across the goal mouth.
+        if goalwardShot {
+            let crossingTime = (keeper.position.y - ball.position.y) / ball.velocity.y
+            if crossingTime > 0, crossingTime <= 1.6 {
+                let crossingX = ball.position.x + ball.velocity.x * crossingTime
+                let goalLimit = Pitch.goalWidth / 2 - Pitch.ballRadius
+                let arrivalHeight = BallFlight.height(after: crossingTime, ball: ball,
+                    gravity: configuration.gravity)
+                if abs(crossingX) <= goalLimit + configuration.diveReach,
+                   arrivalHeight <= configuration.standingSaveHeight + 0.25 {
+                    let read = min(0.82, max(0.18, (crossingTime - 0.08) / 0.82))
+                    target.x = min(goalLimit, max(-goalLimit,
+                        target.x * (1 - read) + crossingX * read))
+                }
+            }
+        }
 
         if isInOwnBox(ball.position, team: team, configuration: configuration),
            ball.velocity.length <= configuration.collectionSpeedLimit,
@@ -177,11 +215,16 @@ enum GoalkeeperAI {
     static func saveOutcome(ball: BallState, keeper: PlayerState, team: Team, state: State,
                             configuration: Configuration = .defaults) -> SaveOutcome? {
         let profile = contactProfile(state: state, configuration: configuration)
+        // At full stretch beside a post the keeper has less useful contact area than through
+        // the middle. Long shots can still be covered by earlier positioning; a close corner
+        // finish cannot be erased by the same generous reach as a central shot.
+        let effectiveReach = effectiveSaveReach(ball: ball, team: team, state: state,
+                                                configuration: configuration)
         guard isInOwnBox(keeper.position, team: team, configuration: configuration),
               isInOwnBox(ball.position, team: team, configuration: configuration),
               ball.height.isFinite, ball.height >= 0, ball.height <= profile.maximumHeight,
               ball.velocity.x.isFinite, ball.velocity.y.isFinite,
-              (ball.position - keeper.position).length <= profile.reach + 0.00001 else { return nil }
+              (ball.position - keeper.position).length <= effectiveReach + 0.00001 else { return nil }
         let relativeSpeed = (ball.velocity - keeper.velocity).length
         let catchSpeed = state.diveRemaining > 0 ? configuration.diveCatchSpeedLimit : configuration.catchSpeedLimit
         if relativeSpeed <= catchSpeed, ball.height <= configuration.catchHeight {

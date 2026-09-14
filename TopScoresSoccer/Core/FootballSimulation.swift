@@ -1676,8 +1676,11 @@ struct FootballSimulation {
                     && handlingRestrictedTeam != keeper.team {
                     if let owner = possessionID, roster[owner].team == keeper.team { continue }
                     let state = keeperStates[keeper.id] ?? GoalkeeperAI.State()
-                    let profile = GoalkeeperAI.contactProfile(state: state, configuration: keeperConfiguration(for: keeper.id))
-                    guard let time = ballTouchTime(keeper.id, radius: profile.reach), time <= earliest,
+                    let configuration = keeperConfiguration(for: keeper.id)
+                    let profile = GoalkeeperAI.contactProfile(state: state, configuration: configuration)
+                    let reach = GoalkeeperAI.effectiveSaveReach(ball: segmentBall, team: keeper.team,
+                                                                state: state, configuration: configuration)
+                    guard let time = ballTouchTime(keeper.id, radius: reach), time <= earliest,
                           eligibleHeight(time, maximum: profile.maximumHeight) else { continue }
                     var candidateBall = segmentBall
                     candidateBall.position += displacement * time
@@ -1687,7 +1690,7 @@ struct FootballSimulation {
                     candidateKeeper.position = positionAtSegmentStart(keeper.id) + actorTravel(keeper.id) * time
                     if let outcome = GoalkeeperAI.saveOutcome(ball: candidateBall, keeper: candidateKeeper,
                                                               team: keeper.team, state: state,
-                                                              configuration: keeperConfiguration(for: keeper.id)) {
+                                                              configuration: configuration) {
                         earliest = time
                         contact = .goalkeeper(keeper.id, outcome)
                     }
