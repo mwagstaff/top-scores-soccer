@@ -11,6 +11,7 @@ private final class FootballActionElement: UIAccessibilityElement {
 final class InputController: UIView {
     weak var scene: GameScene?
     private var movementTouch: UITouch?
+    private var movementNeedsSync = false
     private var actionTouch: UITouch?
     private var pressedButton: PlayerActionButton?
     private var actionStartedAt = 0.0
@@ -39,6 +40,7 @@ final class InputController: UIView {
     private var power: KickPowerFeedback?
     private let stickRadius: CGFloat = 52
     private var actionRadius: CGFloat { min(47, max(36, bounds.width * 0.12)) }
+    private var controlLift: CGFloat { min(32, max(24, bounds.height * 0.03)) }
     private var actionElement: UIAccessibilityElement!
     private var passElement: UIAccessibilityElement!
     private var joystickElement: UIAccessibilityElement!
@@ -83,13 +85,17 @@ final class InputController: UIView {
         CGPoint(x: max(safeAreaInsets.left + 86, bounds.width * 0.14),
                 y: bounds.height - max(safeAreaInsets.bottom + 76, 88))
     }
-    private var actionCenter: CGPoint {
-        CGPoint(x: bounds.width - max(safeAreaInsets.right + 56, bounds.width * 0.14),
-                y: restingStick.y)
+    private var actionColumnX: CGFloat {
+        bounds.width - max(safeAreaInsets.right + 56, bounds.width * 0.14)
     }
 
     private var passCenter: CGPoint {
-        CGPoint(x: actionCenter.x - actionRadius * 2 - 16, y: actionCenter.y - 10)
+        CGPoint(x: actionColumnX - actionRadius * 2 - 16, y: restingStick.y - 10 - controlLift)
+    }
+
+    private var actionCenter: CGPoint {
+        // Stagger the A/B-style cluster without moving the short-pass button.
+        CGPoint(x: actionColumnX, y: passCenter.y - actionRadius * 2 * 0.30)
     }
 
     override func layoutSubviews() {
@@ -133,6 +139,7 @@ final class InputController: UIView {
 
     func clearTouches() {
         movementTouch = nil
+        movementNeedsSync = false
         actionTouch = nil
         pressedButton = nil
         actionStartedAt = 0
@@ -142,6 +149,32 @@ final class InputController: UIView {
         status = .idle
         power = nil
         accessibilityElements = [joystickElement!, passElement!, actionElement!]
+        updateAccessibilityFrames()
+        setNeedsDisplay()
+    }
+
+    /// Match-state transitions cancel simulation input, but UIKit keeps delivering
+    /// the same still-down touch. Preserve the movement thumb so a free kick or
+    /// restart can resume aiming without requiring the player to lift and re-press.
+    func sceneDidResetInput() {
+        guard scene?.gameplayPaused != true else {
+            clearTouches()
+            return
+        }
+        actionTouch = nil
+        pressedButton = nil
+        actionStartedAt = 0
+        status = .idle
+        power = nil
+        accessibilityElements = [joystickElement!, passElement!, actionElement!]
+        if joystickOrigin != nil {
+            movementNeedsSync = true
+            restoreHeldMovementIfPossible()
+        } else {
+            movementTouch = nil
+            joystickOffset = .zero
+            scene?.setMovement(.zero)
+        }
         updateAccessibilityFrames()
         setNeedsDisplay()
     }
@@ -226,6 +259,7 @@ final class InputController: UIView {
         self.takingGoalKick = takingGoalKick
         self.takingPenalty = takingPenalty
         self.power = power
+        restoreHeldMovementIfPossible()
         actionElement.accessibilityCustomActions = (hasBall || canReceive) && !waitingForAutomaticPlay
             ? [("Low power kick", 0.25), ("Medium power kick", 0.55), ("High power kick", 0.85)].map { name, fraction in
                 UIAccessibilityCustomAction(name: name) { [weak self] _ in
@@ -257,7 +291,7 @@ final class InputController: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        guard let scene, !scene.gameplayPaused, scene.simulation.phase == .playing else { return }
+        guard let scene, !scene.gameplayPaused else { return }
         for touch in touches {
             let point = touch.location(in: self)
             switch touchRole(at: point) {
@@ -275,7 +309,8 @@ final class InputController: UIView {
     }
 
     private func beginActionTouch(_ touch: UITouch, button: PlayerActionButton) {
-        guard !waitingForAutomaticPlay, button != .pass || !takingPenalty else { return }
+        guard scene?.simulation.phase == .playing,
+              !waitingForAutomaticPlay, button != .pass || !takingPenalty else { return }
         actionTouch = touch
         pressedButton = button
         actionStartedAt = touch.timestamp
@@ -291,7 +326,17 @@ final class InputController: UIView {
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches where touch === movementTouch { moveMovement(to: touch.location(in: self), timestamp: touch.timestamp) }
+        for touch in touches {
+            if touch === movementTouch {
+                moveMovement(to: touch.location(in: self), timestamp: touch.timestamp)
+            } else if movementTouch == nil {
+                let point = touch.location(in: self)
+                if beginMovement(at: point, timestamp: touch.timestamp) {
+                    movementTouch = touch
+                    moveMovement(to: point, timestamp: touch.timestamp)
+                }
+            }
+        }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -315,22 +360,23 @@ final class InputController: UIView {
 
     enum TouchRole: Equatable { case movement, action, pass }
 
-    /// Native toolbar controls sit above this view. Within the game surface, ACTION
-    /// always owns its hit area, even if another thumb already holds the button.
+    /// Native toolbar controls sit above this view. The left half is always the
+    /// movement surface; action buttons own their hit areas on the right half.
     func touchRole(at point: CGPoint) -> TouchRole? {
         guard bounds.contains(point) else { return nil }
+        if point.x < bounds.midX { return .movement }
         if hypot(point.x - actionCenter.x, point.y - actionCenter.y) <= actionRadius + 7 { return .action }
         if hypot(point.x - passCenter.x, point.y - passCenter.y) <= actionRadius + 7 { return .pass }
-        return point.x < bounds.midX ? .movement : nil
+        return nil
     }
 
     @discardableResult
     func beginMovement(at point: CGPoint, timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
         guard joystickOrigin == nil, touchRole(at: point) == .movement,
-              let scene, !scene.gameplayPaused, scene.simulation.phase == .playing else { return false }
+              let scene, !scene.gameplayPaused else { return false }
         joystickOrigin = point
         joystickOffset = .zero
-        scene.setMovement(.zero, timestamp: timestamp)
+        applyCurrentMovement(timestamp: timestamp)
         updateAccessibilityFrames()
         setNeedsDisplay()
         return true
@@ -340,15 +386,36 @@ final class InputController: UIView {
         guard let origin = joystickOrigin else { return }
         let offset = Vector2(x: point.x - origin.x, y: point.y - origin.y).clampedLength(stickRadius)
         joystickOffset = CGPoint(x: offset.x, y: offset.y)
+        applyCurrentMovement(timestamp: timestamp)
+        setNeedsDisplay()
+    }
+
+    private var currentMovement: Vector2 {
+        let offset = Vector2(x: joystickOffset.x, y: joystickOffset.y)
         let length = offset.length / stickRadius
         let deadZone = min(0.95, max(0, scene?.simulation.tuning.joystickDeadZone ?? 0.12))
         let magnitude = max(0, (length - deadZone) / (1 - deadZone))
-        scene?.setMovement(Vector2(x: offset.x, y: -offset.y).normalized * magnitude, timestamp: timestamp)
-        setNeedsDisplay()
+        return Vector2(x: offset.x, y: -offset.y).normalized * magnitude
+    }
+
+    private func applyCurrentMovement(timestamp: TimeInterval) {
+        guard let scene else { return }
+        if !scene.gameplayPaused, scene.simulation.phase == .playing {
+            scene.setMovement(currentMovement, timestamp: timestamp)
+            movementNeedsSync = false
+        } else {
+            movementNeedsSync = true
+        }
+    }
+
+    private func restoreHeldMovementIfPossible() {
+        guard movementNeedsSync, joystickOrigin != nil else { return }
+        applyCurrentMovement(timestamp: ProcessInfo.processInfo.systemUptime)
     }
 
     func endMovement(timestamp: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         movementTouch = nil
+        movementNeedsSync = false
         joystickOrigin = nil
         joystickOffset = .zero
         scene?.setMovement(.zero, timestamp: timestamp)
@@ -391,14 +458,16 @@ final class InputController: UIView {
         let disabled = waitingForAutomaticPlay || (button == .pass && takingPenalty)
         let color: UIColor = button == .shoot ? (power?.tint ?? UIColor(red: 1, green: 0.80, blue: 0.40, alpha: 1))
             : UIColor(red: 0.62, green: 0.91, blue: 1, alpha: 1)
-        context.setFillColor(UIColor(white: 0.025, alpha: pressed ? 0.80 : 0.55).cgColor)
+        // Twenty percent less opacity keeps both controls readable without
+        // obscuring as much of the pitch beneath the player's thumbs.
+        context.setFillColor(UIColor(white: 0.025, alpha: pressed ? 0.64 : 0.44).cgColor)
         context.setStrokeColor(color.withAlphaComponent(disabled ? 0.25 : 0.9).cgColor)
         context.setLineWidth(pressed ? 3 : 1.5)
         context.addEllipse(in: CGRect(x: center.x - actionRadius, y: center.y - actionRadius,
                                      width: actionRadius * 2, height: actionRadius * 2))
         context.drawPath(using: .fillStroke)
         if pressed {
-            context.setFillColor(color.withAlphaComponent(0.22).cgColor)
+            context.setFillColor(color.withAlphaComponent(0.18).cgColor)
             context.fillEllipse(in: CGRect(x: center.x - actionRadius, y: center.y - actionRadius,
                                            width: actionRadius * 2, height: actionRadius * 2))
         }
@@ -460,7 +529,7 @@ final class InputController: UIView {
     private var powerFrame: CGRect {
         let width = min(176, bounds.width * 0.44)
         return CGRect(x: min(bounds.width - safeAreaInsets.right - width - 12, actionCenter.x - width / 2),
-                      y: passCenter.y - 86, width: width, height: 32)
+                      y: actionCenter.y - actionRadius - 48, width: width, height: 32)
     }
 
     private func drawPower(_ power: KickPowerFeedback, in context: CGContext) {

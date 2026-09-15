@@ -15,8 +15,8 @@ struct FriendlySetupView: View {
     init() {
         let catalogue = PremierLeagueStore()
         _store = State(initialValue: catalogue)
-        _home = State(initialValue: catalogue.teams.first.map { .autoSelect(team: $0, formation: .fourFourTwo) })
-        _away = State(initialValue: catalogue.teams.dropFirst().first.map { .autoSelect(team: $0, formation: .fourFourTwo) })
+        _home = State(initialValue: catalogue.teams.first.map { FriendlyTeamPreferences.load($0) })
+        _away = State(initialValue: catalogue.teams.dropFirst().first.map { FriendlyTeamPreferences.load($0) })
     }
 
     var body: some View {
@@ -72,7 +72,7 @@ struct FriendlySetupView: View {
                 FriendlyClubPicker(teams: store.teams, side: side,
                                    selectedID: lineup(for: side)?.team.id,
                                    unavailableID: lineup(for: side.opponent)?.team.id) { team in
-                    setLineup(.autoSelect(team: team, formation: lineup(for: side)?.formation ?? .fourFourTwo), for: side)
+                    setLineup(FriendlyTeamPreferences.load(team), for: side)
                     pickingClub = nil
                 }
             }
@@ -85,7 +85,11 @@ struct FriendlySetupView: View {
                 }
             }
             .fullScreenCover(item: $presentedMatch, onDismiss: updateAvailableLineups) { match in
-                SandboxView(configuration: match.configuration, onExit: { presentedMatch = nil })
+                PreMatchGate(configuration: match.configuration, onExit: { presentedMatch = nil }, onSave: { lineup in
+                    setLineup(lineup, for: .home)
+                }) { prepared, playing in
+                    SandboxView(configuration: prepared, onRematch: { playing.wrappedValue = false }, onExit: { presentedMatch = nil })
+                }
             }
             .fullScreenCover(item: $presentedPractice) { practice in
                 SandboxView(startingMode: practice.mode, onExit: { presentedPractice = nil })
@@ -251,6 +255,7 @@ struct FriendlySetupView: View {
     private func lineup(for side: FriendlySide) -> ClubLineup? { side == .home ? home : away }
 
     private func setLineup(_ lineup: ClubLineup, for side: FriendlySide) {
+        FriendlyTeamPreferences.save(lineup)
         if side == .home { home = lineup } else { away = lineup }
     }
 
@@ -262,10 +267,11 @@ struct FriendlySetupView: View {
             let formation = prior?.formation ?? .fourFourTwo
             if let prior, prior.team.id == team.id {
                 let players = prior.players.compactMap { previous in team.players.first { $0.id == previous.id } }
-                let candidate = ClubLineup(team: team, formation: formation, players: players)
+                let candidate = ClubLineup(team: team, formation: formation, players: players,
+                                           style: prior.style, automaticFormation: prior.automaticFormation)
                 if candidate.isValid { return candidate }
             }
-            return .autoSelect(team: team, formation: formation)
+            return FriendlyTeamPreferences.load(team)
         }
         home = updated(home, excluding: nil)
         away = updated(away, excluding: home?.team.id)
@@ -380,177 +386,35 @@ private struct FriendlyClubPicker: View {
 }
 
 struct FriendlyLineupEditor: View {
-    @State var lineup: ClubLineup
-    let onSave: (ClubLineup) -> Void
-    @State private var selectedSlot: LineupSlotSelection?
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    Picker("Formation", selection: formationBinding) {
-                        Text(MatchFormation.fourFourTwo.title).tag(MatchFormation.fourFourTwo)
-                        Text(MatchFormation.fourThreeThree.title).tag(MatchFormation.fourThreeThree)
-                        Text(MatchFormation.fourTwoThreeOne.title).tag(MatchFormation.fourTwoThreeOne)
-                    }
-                    .accessibilityIdentifier("friendly.formation")
-                } header: {
-                    Text(lineup.team.name)
-                } footer: {
-                    Text("Changing formation picks a balanced XI. Tap a player to choose a replacement.")
-                }
-                Section("Starting XI") {
-                    ForEach(Array(lineup.players.enumerated()), id: \.offset) { index, player in
-                        Button { selectedSlot = LineupSlotSelection(index: index) } label: {
-                            FriendlyPlayerRow(player: player, role: slotRole(at: index))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("friendly.lineup.slot.\(index)")
-                    }
-                }
-                Section {
-                    Text("Ratings shape arcade abilities. Position adds playing tendencies; detailed skills are game estimates.")
-                    Text("Estimated ratings fill missing values. Stand-in players fill incomplete squads.")
-                }
-                .font(.footnote).foregroundStyle(.secondary)
-            }
-            .navigationTitle("Starting XI")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { onSave(lineup) }.disabled(!lineup.isValid)
-                        .accessibilityIdentifier("friendly.lineup.done")
-                }
-            }
-            .sheet(item: $selectedSlot) { slot in
-                FriendlyPlayerPicker(lineup: lineup, slot: slot.index) { player in
-                    if let replacement = lineup.replacingPlayer(at: slot.index, with: player) {
-                        lineup = replacement
-                    }
-                    selectedSlot = nil
-                }
-            }
-        }
-        .tint(FriendlyStyle.lime).preferredColorScheme(.dark)
-    }
-
-    private var formationBinding: Binding<MatchFormation> {
-        Binding(get: { lineup.formation }, set: { formation in
-            lineup = .autoSelect(team: lineup.team, formation: formation)
-        })
-    }
-
-    private func slotRole(at index: Int) -> String {
-        guard lineup.formation.slots.indices.contains(index) else { return "" }
-        return lineup.formation.slots[index].role
-    }
-}
-
-private struct LineupSlotSelection: Identifiable {
-    let index: Int
-    var id: Int { index }
-}
-
-private struct FriendlyPlayerPicker: View {
     let lineup: ClubLineup
-    let slot: Int
-    let onSelect: (ClubPlayer) -> Void
-    @Environment(\.dismiss) private var dismiss
-
+    let onSave: (ClubLineup) -> Void
     var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    ForEach(candidates, id: \.id) { player in
-                        Button { onSelect(player) } label: {
-                            VStack(alignment: .leading, spacing: 2) {
-                                FriendlyPlayerRow(player: player, role: player.role)
-                                if lineup.players.contains(where: { $0.id == player.id }) {
-                                    Text("In starting XI · swap positions")
-                                        .font(.caption).foregroundStyle(.secondary).padding(.leading, 44)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(player.name), rating \(Int(player.effectiveRating.rounded()))\(lineup.players.contains(where: { $0.id == player.id }) ? ", swap positions" : "")")
-                        .accessibilityIdentifier("friendly.replacement.\(player.id)")
-                    }
-                } header: {
-                    Text(slot == 0 ? "Goalkeepers" : "Outfield players")
-                } footer: {
-                    Text("Choose a squad player to replace this starter, or choose another starter to swap their positions.")
-                }
-            }
-            .overlay {
-                if candidates.isEmpty {
-                    ContentUnavailableView("No replacements", systemImage: "person.fill.checkmark",
-                                           description: Text("There are no other eligible players in this squad."))
-                }
-            }
-            .navigationTitle("Choose a player")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
-        }
-        .tint(FriendlyStyle.lime).preferredColorScheme(.dark)
-    }
-
-    private var candidates: [ClubPlayer] {
-        let selectedID = lineup.players[slot].id
-        return lineup.team.players.filter { player in
-            player.id != selectedID && ((player.role == "G") == (slot == 0))
-        }.sorted { left, right in
-            let role = lineup.formation.slots[slot].role
-            if (left.role == role) != (right.role == role) { return left.role == role }
-            if left.effectiveRating != right.effectiveRating { return left.effectiveRating > right.effectiveRating }
-            return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
+        TeamManagementView(lineup: lineup, kit: MatchKits.resolve(configuration: .init(home: lineup, away: lineup)).home) { selection, _ in
+            onSave(selection)
         }
     }
 }
 
-private struct FriendlyPlayerRow: View {
-    let player: ClubPlayer
-    let role: String
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text(role == "G" ? "GK" : role)
-                .font(.caption.weight(.bold).monospaced()).foregroundStyle(FriendlyStyle.lime)
-                .lineLimit(1).minimumScaleFactor(0.75)
-                .frame(width: 32, height: 36)
-                .background(FriendlyStyle.panel, in: RoundedRectangle(cornerRadius: 8))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(player.name).font(.body.weight(.medium)).foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 6) { playerDetails }
-                    VStack(alignment: .leading, spacing: 3) { playerDetails }
-                }
-                .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 3)
-            VStack(spacing: 2) {
-                Text("\(Int(player.effectiveRating.rounded()))").font(.headline.monospacedDigit())
-                    .foregroundStyle(FriendlyStyle.lime)
-                Text(player.rating == nil ? "EST." : "OVR")
-                    .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
-            }
+@MainActor
+private enum FriendlyTeamPreferences {
+    private static var defaults: UserDefaults {
+#if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--uitesting") {
+            let testID = ProcessInfo.processInfo.environment["FRIENDLY_TEST_STORE_ID"] ?? "default"
+            return UserDefaults(suiteName: "friendly-tests.\(testID)") ?? .standard
         }
-        .padding(.vertical, 5)
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(player.name), \(role == "G" ? "goalkeeper" : role), rating \(Int(player.effectiveRating.rounded()))\(player.rating == nil ? ", estimated" : "")\(player.isGenerated ? ", stand-in player" : "")")
+#endif
+        return .standard
     }
-
-    @ViewBuilder private var playerDetails: some View {
-        if let number = player.jerseyNumber { Text("No. \(number)") }
-        if player.isGenerated {
-            Text("Stand-in player")
-        } else if player.rating == nil {
-            Text("Estimated rating")
+    static func load(_ team: ClubTeam) -> ClubLineup {
+        if let data = defaults.data(forKey: "friendly.selection.\(team.id)"),
+           let saved = try? JSONDecoder().decode(SavedTeamSelection.self, from: data),
+           let lineup = saved.restored(for: team) { return lineup }
+        return .autoSelect(team: team)
+    }
+    static func save(_ lineup: ClubLineup) {
+        if let data = try? JSONEncoder().encode(SavedTeamSelection(lineup)) {
+            defaults.set(data, forKey: "friendly.selection.\(lineup.team.id)")
         }
     }
 }

@@ -5,6 +5,11 @@ struct FootballSimulation {
     var tuning: GameplayTuning
     private(set) var configuration: FriendlyMatchConfiguration?
     // Tests can supply a fixed coin toss; live sessions draw a fresh toss for every new match.
+    private(set) var liveHomeLineup: ClubLineup?
+    private(set) var liveAwayLineup: ClubLineup?
+    private(set) var pendingSubstitutions: [PendingSubstitution] = []
+    private(set) var substitutionsUsed: [Team: Int] = [:]
+    private var pendingFormation: MatchFormation?
     private let chooseStartingEnds: () -> Bool
     private var firstHalfBlueAttacksNorth = true
     private(set) var ends = MatchEnds()
@@ -175,6 +180,7 @@ struct FootballSimulation {
 
     mutating func resumeAfterHalfTime() {
         guard phase == .halfTime else { return }
+        applyPendingSubstitutionsIfStopped()
         matchHalf = 2
         ends.blueAttacksNorth.toggle()
         periodElapsed = 0
@@ -361,6 +367,8 @@ struct FootballSimulation {
         self.injuryRandomState = injurySeed
         self.tuning = tuning
         self.configuration = configuration?.isValid == true ? configuration : nil
+        self.liveHomeLineup = self.configuration?.home
+        self.liveAwayLineup = self.configuration?.away
         self.mode = self.configuration == nil ? mode : .match
         if self.mode == .passing { configureExercise() }
         else if self.mode == .match { configureMatch() }
@@ -604,6 +612,7 @@ struct FootballSimulation {
     mutating func step(dt: Double) {
         guard dt.isFinite, dt > 0 else { return }
         if case .practiceEnded = phase { return }
+        applyPendingSubstitutionsIfStopped()
         if phase == .fullTime || phase == .halfTime || pendingInjuryID != nil { return }
         substitutionNoticeRemaining = max(0, substitutionNoticeRemaining - dt)
         if substitutionNoticeRemaining == 0 { substitutionNotice = nil }
@@ -1282,6 +1291,11 @@ struct FootballSimulation {
         substitutionNotice = nil
         substitutionNoticeRemaining = 0
         unavailableSquadIDs.removeAll()
+        liveHomeLineup = configuration?.home
+        liveAwayLineup = configuration?.away
+        pendingSubstitutions.removeAll()
+        pendingFormation = nil
+        substitutionsUsed.removeAll()
         matchRestart = nil
         lastTouchTeam = nil
         lastDeliberatePlayTeam = nil
@@ -1362,8 +1376,15 @@ struct FootballSimulation {
         let savedRoster = roster
         let savedUnavailable = unavailableSquadIDs
         let savedInjuryRandom = injuryRandomState
+        let savedHome = liveHomeLineup, savedAway = liveAwayLineup
+        let savedSubstitutions = substitutionsUsed
+        let savedPending = pendingSubstitutions
+        let savedFormation = pendingFormation
         reset(clearScore: true, preserveStartingEnds: true)
         roster = savedRoster
+        liveHomeLineup = savedHome; liveAwayLineup = savedAway
+        substitutionsUsed = savedSubstitutions
+        pendingSubstitutions = savedPending; pendingFormation = savedFormation
         unavailableSquadIDs = savedUnavailable
         injuryRandomState = savedInjuryRandom
         prepareMatchRestart(MatchRestart(kind: .kickoff, team: .blue, position: .zero, takerID: nil))
@@ -1439,7 +1460,7 @@ struct FootballSimulation {
         player.position += player.velocity * dt
 
         let xLimit = Pitch.width / 2 - Pitch.playerRadius
-        let yLimit = Pitch.length / 2 - Pitch.playerRadius
+        let yLimit = footballerYLimit(atX: player.position.x)
         if abs(player.position.x) > xLimit {
             player.position.x = min(xLimit, max(-xLimit, player.position.x))
             player.velocity.x = 0
@@ -2054,8 +2075,9 @@ struct FootballSimulation {
     private func startingMatchPosition(for id: Int) -> Vector2 {
         if let configuration {
             let home = id < 11
-            let lineup = home ? configuration.home : configuration.away
-            let slot = id % 11
+            let lineup = (home ? liveHomeLineup : liveAwayLineup) ?? (home ? configuration.home : configuration.away)
+            let slot = roster.indices.contains(id)
+                ? lineup.players.firstIndex(where: { $0.id == roster[id].clubPlayer?.id }) ?? id % 11 : id % 11
             if lineup.formation.slots.indices.contains(slot) {
                 let formationSlot = lineup.formation.slots[slot]
                 var position = formationSlot.position
@@ -2559,7 +2581,7 @@ struct FootballSimulation {
         let members = roster.filter { $0.team == roster[id].team && !$0.isGoalkeeper }.map(\.id)
         let slot = members.firstIndex(of: id) ?? 0
         let role = configuration.map {
-            (roster[id].team == .blue ? $0.home : $0.away).formation.slots[id % 11].role
+            formationSlot(for: id)?.role ?? (roster[id].team == .blue ? $0.home : $0.away).formation.slots[id % 11].role
         } ?? (slot < 2 ? "D" : "F")
         let shapeDepth = friendly ? 4.5 : role == "F" ? 4.5 : role == "D" ? 12.0 : 8.0
         let minimumDepth = keeperConfiguration.boxDepth + shapeDepth
@@ -2619,12 +2641,12 @@ struct FootballSimulation {
         return true
     }
 
-    private func matchFormationTarget(for id: Int, inPossession: Bool) -> Vector2 {
+    func matchFormationTarget(for id: Int, inPossession: Bool) -> Vector2 {
         let team = roster[id].team
         let attack = ends.attackSign(for: team)
         if let configuration {
-            let lineup = team == .blue ? configuration.home : configuration.away
-            let slot = lineup.formation.slots[id % 11]
+            let lineup = (team == .blue ? liveHomeLineup : liveAwayLineup) ?? (team == .blue ? configuration.home : configuration.away)
+            let slot = formationSlot(for: id) ?? lineup.formation.slots[id % 11]
             let ballProgress = ball.position.y * attack
             let anchor: Double
             let minimum: Double
@@ -2644,7 +2666,9 @@ struct FootballSimulation {
             }
             let width = inPossession ? 1.0 : 0.87
             let x = slot.position.x * attack * width + ball.position.x * 0.16
-            return Vector2(x: min(28, max(-28, x)), y: min(maximum, max(minimum, anchor)) * attack)
+            let adjustment = lineup.style.depthAdjustment(role: slot.role, inPossession: inPossession)
+            return Vector2(x: min(28, max(-28, x)),
+                           y: min(43, max(-43, min(maximum + adjustment, max(minimum + adjustment, anchor + adjustment)))) * attack)
         }
         let members = roster.filter { $0.team == team && !$0.isGoalkeeper }.map(\.id)
         let slot = members.firstIndex(of: id) ?? 0
@@ -2784,7 +2808,9 @@ struct FootballSimulation {
 
     private mutating func clampFootballer(_ id: Int) {
         let xLimit = Pitch.width / 2 - Pitch.playerRadius
-        let yLimit = penaltyFlight?.goalkeeperID == id ? Pitch.length / 2 : Pitch.length / 2 - Pitch.playerRadius
+        let yLimit = penaltyFlight?.goalkeeperID == id
+            ? Pitch.length / 2
+            : footballerYLimit(atX: roster[id].state.position.x)
         if abs(roster[id].state.position.x) > xLimit {
             roster[id].state.position.x = min(xLimit, max(-xLimit, roster[id].state.position.x))
             roster[id].state.velocity.x = 0
@@ -2793,6 +2819,15 @@ struct FootballSimulation {
             roster[id].state.position.y = min(yLimit, max(-yLimit, roster[id].state.position.y))
             roster[id].state.velocity.y = 0
         }
+    }
+
+    /// The goal line is a boundary only beside the goal. Through the opening, a footballer can
+    /// follow a controlled ball into the net; the swept ball boundary still decides the goal.
+    private func footballerYLimit(atX x: Double) -> Double {
+        let clearGoalHalfWidth = Pitch.goalWidth / 2 - Pitch.postRadius - Pitch.playerRadius
+        return abs(x) <= clearGoalHalfWidth
+            ? Pitch.length / 2 + Pitch.goalDepth - Pitch.playerRadius
+            : Pitch.length / 2 - Pitch.playerRadius
     }
 
     private mutating func separateFootballers() {
@@ -3476,6 +3511,7 @@ struct FootballSimulation {
 
     private func replacements(for id: Int) -> [ClubPlayer] {
         let team = roster[id].team
+        guard (substitutionsUsed[team] ?? 0) < 5 else { return [] }
         let squad: [ClubPlayer]
         if let configuration {
             squad = (team == .blue ? configuration.home : configuration.away).team.players
@@ -3511,7 +3547,7 @@ struct FootballSimulation {
         if roster[id].team == .blue {
             pendingInjuryID = id
         } else if let replacement = replacements(for: id).first {
-            replaceInjuredPlayer(id, with: replacement)
+            replacePlayer(id, with: replacement)
         }
     }
 
@@ -3520,7 +3556,7 @@ struct FootballSimulation {
         guard let id = pendingInjuryID, roster[id].isInjured, !roster[id].isSentOff,
               let replacement = replacements(for: id).first(where: { $0.id == playerID }),
               let foul = lastFoul else { return false }
-        replaceInjuredPlayer(id, with: replacement)
+        replacePlayer(id, with: replacement)
         pendingInjuryID = nil
         prepareFreeKick(for: foul.awardedTeam)
         return true
@@ -3532,8 +3568,19 @@ struct FootballSimulation {
         prepareFreeKick(for: foul.awardedTeam)
     }
 
-    private mutating func replaceInjuredPlayer(_ id: Int, with replacement: ClubPlayer) {
+    private mutating func replacePlayer(_ id: Int, with replacement: ClubPlayer) {
         let outgoing = roster[id]
+        substitutionsUsed[outgoing.team, default: 0] += 1
+        if let identity = outgoing.clubPlayer?.id {
+            pendingSubstitutions.removeAll { $0.outgoingID == identity || $0.incomingID == replacement.id }
+            if outgoing.team == .blue, let lineup = liveHomeLineup,
+               let slot = lineup.players.firstIndex(where: { $0.id == identity }) {
+                liveHomeLineup = lineup.replacingPlayer(at: slot, with: replacement)
+            } else if let lineup = liveAwayLineup,
+                      let slot = lineup.players.firstIndex(where: { $0.id == identity }) {
+                liveAwayLineup = lineup.replacingPlayer(at: slot, with: replacement)
+            }
+        }
         substitutionNotice = "\(replacement.displayName) on for injured \(outgoing.clubPlayer?.displayName ?? "player \(id + 1)")"
         substitutionNoticeRemaining = 7
         if let identity = outgoing.clubPlayer?.id { unavailableSquadIDs.insert(identity) }
@@ -3546,6 +3593,9 @@ struct FootballSimulation {
         kickGuards[id] = nil
         recoveryTimers[id] = nil
         tackleTimers[id] = nil
+        headingTimers[id] = nil
+        tackleHits.removeAll()
+        attackingTargets.removeAll()
         rearPressure.removeAll()
     }
 
@@ -4170,13 +4220,18 @@ struct FootballSimulation {
         } else { released = nil }
         attackingTargets = AttackingSupport.targets(roster: roster, team: team, carrierID: carrier,
             ball: ball, baseTargets: bases, releasedPass: released,
-            offsideLine: OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends), ends: ends)
+            offsideLine: OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends),
+            configuration: supportConfiguration(for: team), ends: ends)
         // A wide carrier invites near-post, central and far-post runs before releasing.
         // After release those runs can cross the old line; Law 11 still uses the kick snapshot.
         let boxRuns = CrossingMechanics.supportTargets(crosser: roster[carrier], roster: roster,
             offsideLine: possessionID != nil
                 ? OffsideRules.line(team: team, ball: ball.position, roster: roster, ends: ends) : nil, ends: ends)
-        for (id, target) in boxRuns where id != activePassTargetID { attackingTargets[id] = target }
+        for (id, target) in boxRuns where id != activePassTargetID {
+            if playStyle(for: team) != .defensive || formationSlot(for: id)?.role == "F" {
+                attackingTargets[id] = target
+            }
+        }
     }
 
     private func aiTarget(for id: Int) -> Vector2 {
@@ -4299,5 +4354,117 @@ struct FootballSimulation {
         releaseReturningReceiverGuard(from: owner, isShot: ball.mode == .shot)
         aiDecisionCountdown = 1
         endAftertouch()
+    }
+}
+
+// MARK: - Live team management
+extension FootballSimulation {
+    func playStyle(for team: Team) -> PlayStyle {
+        (team == .blue ? liveHomeLineup : liveAwayLineup)?.style ?? .normal
+    }
+
+    private func formationSlot(for id: Int) -> FormationSlot? {
+        guard roster.indices.contains(id),
+              let lineup = roster[id].team == .blue ? liveHomeLineup : liveAwayLineup,
+              let slot = lineup.players.firstIndex(where: { $0.id == roster[id].clubPlayer?.id }) else { return nil }
+        return lineup.formation.slots[slot]
+    }
+
+    private func supportConfiguration(for team: Team) -> AttackingSupport.Configuration {
+        var result = AttackingSupport.Configuration.defaults
+        switch playStyle(for: team) {
+        case .normal: break
+        case .defensive:
+            result.runnerCount = 1
+            result.runDistance = 9
+        case .attacking:
+            result.runnerCount = 3
+            result.runDistance = 20
+            // Overlap in sustained bursts, leaving the other defenders in their shape.
+            if Int(matchTimeElapsed / 4).isMultiple(of: 2) {
+                result.overlappingDefenderID = roster.filter {
+                    $0.team == team && !$0.isUnavailable && formationSlot(for: $0.id)?.role == "D"
+                }.min { ($0.state.position - ball.position).length < ($1.state.position - ball.position).length }?.id
+                result.runnerCount = 4
+            }
+        }
+        return result
+    }
+
+    var projectedHomeLineup: ClubLineup? {
+        guard var lineup = liveHomeLineup else { return nil }
+        lineup.automaticFormation = false
+        for change in pendingSubstitutions {
+            guard let slot = lineup.players.firstIndex(where: { $0.id == change.outgoingID }),
+                  let replacement = lineup.team.players.first(where: { $0.id == change.incomingID }),
+                  let updated = lineup.replacingPlayer(at: slot, with: replacement) else { continue }
+            lineup = updated
+        }
+        lineup.automaticFormation = liveHomeLineup?.automaticFormation ?? true
+        return lineup.automaticFormation ? lineup.balanced() : lineup.arranged(in: pendingFormation ?? lineup.formation)
+    }
+
+    /// Validate the whole draft before publishing anything; UI dismissal cannot half-apply it.
+    @discardableResult
+    mutating func updateTeamManagement(_ requested: ClubLineup, substitutions: [PendingSubstitution]) -> Bool {
+        guard mode == .match, phase != .fullTime, pendingInjuryID == nil,
+              let current = liveHomeLineup, requested.isValid, requested.team == current.team,
+              substitutions.count + (substitutionsUsed[.blue] ?? 0) <= 5,
+              Set(substitutions.map(\.outgoingID)).count == substitutions.count,
+              Set(substitutions.map(\.incomingID)).count == substitutions.count else { return false }
+        var expected = Set(current.players.map(\.id))
+        for change in substitutions {
+            guard let outgoing = roster.first(where: { $0.team == .blue && $0.clubPlayer?.id == change.outgoingID }),
+                  !outgoing.isUnavailable,
+                  let incoming = current.team.players.first(where: { $0.id == change.incomingID }),
+                  !current.players.contains(where: { $0.id == incoming.id }),
+                  !unavailableSquadIDs.contains(incoming.id),
+                  (incoming.role == "G") == outgoing.isGoalkeeper else { return false }
+            expected.remove(change.outgoingID); expected.insert(change.incomingID)
+        }
+        guard expected == Set(requested.players.map(\.id)) else { return false }
+        pendingSubstitutions = substitutions
+        pendingFormation = requested.formation
+        var updated = current
+        updated.style = requested.style
+        updated.automaticFormation = requested.automaticFormation
+        if substitutions.isEmpty { updated = updated.arranged(in: requested.formation) }
+        liveHomeLineup = updated
+        cancelInput()
+        applyPendingSubstitutionsIfStopped()
+        return true
+    }
+
+    private var canMakeSubstitutionNow: Bool {
+        guard pendingInjuryID == nil else { return false }
+        switch phase {
+        case .halfTime, .goal, .outOfPlay, .restart: return true
+        case .playing: return freeKickReadyTeam != nil && !isPenaltyKickInFlight
+        default: return false
+        }
+    }
+
+    private mutating func applyPendingSubstitutionsIfStopped() {
+        guard !pendingSubstitutions.isEmpty, canMakeSubstitutionNow else { return }
+        let changes = pendingSubstitutions
+        let formation = pendingFormation
+        pendingSubstitutions.removeAll(); pendingFormation = nil
+        var notices: [String] = []
+        for change in changes {
+            guard (substitutionsUsed[.blue] ?? 0) < 5,
+                  let id = roster.first(where: { $0.team == .blue && $0.clubPlayer?.id == change.outgoingID })?.id,
+                  !roster[id].isUnavailable,
+                  let incoming = replacements(for: id).first(where: { $0.id == change.incomingID }) else { continue }
+            let name = roster[id].clubPlayer?.displayName ?? "Player"
+            replacePlayer(id, with: incoming)
+            notices.append("\(incoming.displayName) on for \(name)")
+        }
+        if let lineup = liveHomeLineup {
+            liveHomeLineup = lineup.automaticFormation ? lineup.balanced() : lineup.arranged(in: formation ?? lineup.formation)
+        }
+        if !notices.isEmpty {
+            substitutionNotice = notices.joined(separator: " · ")
+            substitutionNoticeRemaining = 7
+        }
     }
 }

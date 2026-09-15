@@ -101,6 +101,8 @@ struct WorldCupStanding: Hashable, Identifiable, Sendable {
 struct WorldCupLineupSelection: Codable, Hashable, Sendable {
     var formation: MatchFormation
     var playerIDs: [String]
+    var style: PlayStyle? = nil
+    var automaticFormation: Bool? = nil
 }
 
 struct WorldCupUserMatchOutcome: Equatable, Sendable {
@@ -146,7 +148,8 @@ struct WorldCupSave: Codable, Hashable, Sendable {
     var lineup: ClubLineup {
         let byID = Dictionary(uniqueKeysWithValues: selectedTeam.players.map { ($0.id, $0) })
         return ClubLineup(team: selectedTeam, formation: lineupSelection.formation,
-                          players: lineupSelection.playerIDs.compactMap { byID[$0] })
+                          players: lineupSelection.playerIDs.compactMap { byID[$0] },
+                          style: lineupSelection.style ?? .normal, automaticFormation: lineupSelection.automaticFormation ?? true)
     }
     var selectedGroupIndex: Int { groups.firstIndex { $0.contains(selectedTeamID) }! }
     var selectedGroupName: String { Self.groupName(selectedGroupIndex) }
@@ -211,7 +214,8 @@ struct WorldCupSave: Codable, Hashable, Sendable {
     mutating func updateLineup(_ selection: ClubLineup) throws {
         guard selection.team == selectedTeam, selection.isValid,
               selection.players.allSatisfy({ selectedTeam.players.contains($0) }) else { throw WorldCupError.invalidLineup }
-        lineupSelection = .init(formation: selection.formation, playerIDs: selection.players.map(\.id))
+        lineupSelection = .init(formation: selection.formation, playerIDs: selection.players.map(\.id),
+                                style: selection.style, automaticFormation: selection.automaticFormation)
     }
 
     @discardableResult

@@ -9,6 +9,7 @@ final class PremierLeagueUITests: XCTestCase {
         chooseClub("Liverpool", side: "away", in: app)
 
         element("friendly.home.lineup", in: app).tap()
+        element("team.automatic", in: app).tap()
         let formation = element("friendly.formation", in: app)
         XCTAssertTrue(formation.waitForExistence(timeout: 5))
         formation.tap()
@@ -16,6 +17,7 @@ final class PremierLeagueUITests: XCTestCase {
 
         let defender = element("friendly.lineup.slot.1", in: app)
         XCTAssertTrue(defender.waitForExistence(timeout: 5))
+        for _ in 0..<5 where !defender.isHittable { app.swipeUp() }
         defender.tap()
         let replacement = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "friendly.replacement.")).firstMatch
@@ -34,6 +36,8 @@ final class PremierLeagueUITests: XCTestCase {
         attach(app, name: "Premier League match setup")
 
         element("friendly.kickoff", in: app).tap()
+        XCTAssertTrue(element("team.kickoff", in: app).waitForExistence(timeout: 10))
+        element("team.kickoff", in: app).tap()
         let action = element("sandbox.action", in: app)
         XCTAssertTrue(action.waitForExistence(timeout: 10))
         assertValue(action, contains: "players:22;")
@@ -66,7 +70,7 @@ final class PremierLeagueUITests: XCTestCase {
         let done = element("friendly.lineup.done", in: app)
         XCTAssertTrue(done.waitForExistence(timeout: 5))
         XCTAssertTrue(done.isHittable)
-        XCTAssertTrue(element("friendly.formation", in: app).exists)
+        XCTAssertTrue(element("team.automatic", in: app).exists)
         attach(app, name: "Premier League lineup at accessibility XXXL")
         done.tap()
         XCTAssertTrue(kickoff.waitForExistence(timeout: 5))
@@ -83,6 +87,8 @@ final class PremierLeagueUITests: XCTestCase {
         app.buttons["Cancel"].firstMatch.tap()
 
         element("friendly.kickoff", in: app).tap()
+        XCTAssertTrue(element("team.kickoff", in: app).waitForExistence(timeout: 10))
+        element("team.kickoff", in: app).tap()
         let action = element("sandbox.action", in: app)
         XCTAssertTrue(action.waitForExistence(timeout: 10))
         assertValue(action, contains: "restartReady:true;")
@@ -103,6 +109,7 @@ final class PremierLeagueUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--uitesting", "--premier-league"] + (short ? ["--short-match"] : [])
             + (largeText ? ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"] : [])
+        app.launchEnvironment["FRIENDLY_TEST_STORE_ID"] = UUID().uuidString
         app.launch()
         XCTAssertTrue(element("friendly.kickoff", in: app).waitForExistence(timeout: 10))
         return app

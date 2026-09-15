@@ -87,6 +87,30 @@ final class PitchRenderer {
         root.addChild(artwork)
     }
 
+    private static let iconCache = NSCache<NSString, UIImage>()
+    private static let iconRenderer = PitchRenderer()
+    private static let iconView = SKView(frame: CGRect(x: 0, y: 0, width: 100, height: 120))
+
+    /// Snapshot the same figure builder used on the pitch, without match indicators.
+    static func playerIcon(_ player: ClubPlayer, kit: ClubKit) -> UIImage? {
+        let key = "\(player.id)|\(player.appearance)|\(player.jerseyNumber ?? 0)|\(player.role)|\(kit)" as NSString
+        if let cached = iconCache.object(forKey: key) { return cached }
+        iconCache.countLimit = 160
+        let sprite = iconRenderer.buildPlayer(team: .blue, number: player.jerseyNumber ?? 0,
+            isGoalkeeper: player.role == "G", kit: kit, appearance: player.appearance,
+            shirtNumber: player.jerseyNumber.map(String.init) ?? "–")
+        sprite.root.removeFromParent(); sprite.shadow.removeFromParent()
+        sprite.figure.removeFromParent()
+        sprite.figure.position = .zero
+        sprite.figure.setScale(1)
+        sprite.leftBoot.position.x = -5.6; sprite.rightBoot.position.x = 5.6
+        let bounds = sprite.figure.calculateAccumulatedFrame().insetBy(dx: -4, dy: -4)
+        guard let texture = iconView.texture(from: sprite.figure, crop: bounds) else { return nil }
+        let image = UIImage(cgImage: texture.cgImage())
+        iconCache.setObject(image, forKey: key)
+        return image
+    }
+
     func resetControlFeedback() {
         lastSelectedPlayerID = nil
         handoverRemaining = 0

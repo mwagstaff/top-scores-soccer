@@ -26,7 +26,7 @@ final class SandboxSurfaceView: UIView {
         addSubview(controls)
         spriteView.isUserInteractionEnabled = false
         controls.scene = scene
-        scene.onResetInput = { [weak controls] in controls?.clearTouches() }
+        scene.onResetInput = { [weak controls] in controls?.sceneDidResetInput() }
         scene.onControlFeedback = { [weak controls] status, hasBall, curving in
             controls?.feedback(status: status, hasBall: hasBall, curving: curving)
         }

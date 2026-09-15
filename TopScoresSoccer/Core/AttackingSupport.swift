@@ -9,6 +9,8 @@ enum AttackingSupport {
     }
 
     struct Configuration: Sendable {
+        var runnerCount = 2
+        var overlappingDefenderID: Int?
         var shortDistance = 10.0
         var runDistance = 15.0
         var onsideMargin = 1.2
@@ -70,7 +72,7 @@ enum AttackingSupport {
 
         // Formation progress gives forwards stable run duties, rather than reassigning roles
         // every time two nearby players exchange their distance ranking to the ball.
-        let runnerCount = min(teammates.count >= 7 ? 2 : 1, max(0, available.count - 1))
+        let runnerCount = min(teammates.count >= 7 ? configuration.runnerCount : 1, max(0, available.count - 1))
         var runners: [Footballer] = []
         var remainder = available
         while runners.count < runnerCount {
@@ -80,7 +82,8 @@ enum AttackingSupport {
                     let previousLane = runners.first.map { base($0).x }
                     let sameLane = previousLane.map { max(0, 12 - abs(home.x - $0)) * 0.8 } ?? 0
                     let returnPenalty = releasedPass != nil && player.id == carrierID ? 30.0 : 0
-                    return -home.y + sameLane + returnPenalty
+                    let overlapBonus = player.id == configuration.overlappingDefenderID ? -100.0 : 0
+                    return -home.y + sameLane + returnPenalty + overlapBonus
                         + max(0, (local(player.state.position) - anchor).length - 32) * 0.4
                 }
                 let a = cost(first), b = cost(second)

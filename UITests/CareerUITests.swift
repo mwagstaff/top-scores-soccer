@@ -46,12 +46,14 @@ final class CareerUITests: XCTestCase {
         assertValue(element("career.progress", in: app), contains: "round:1;")
 
         element("career.lineup", in: app).tap()
+        element("team.automatic", in: app).tap()
         let formation = element("friendly.formation", in: app)
         XCTAssertTrue(formation.waitForExistence(timeout: 5))
         formation.tap()
         app.buttons["4–3–3"].firstMatch.tap()
 
         let defender = element("friendly.lineup.slot.1", in: app)
+        for _ in 0..<5 where !defender.isHittable { app.swipeUp() }
         defender.tap()
         let replacement = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "friendly.replacement.")).firstMatch
@@ -90,6 +92,8 @@ final class CareerUITests: XCTestCase {
         startCareer(clubID: "9", name: "Tottenham", in: app)
         assertValue(element("career.progress", in: app), contains: "round:1;")
         element("career.play", in: app).tap()
+        XCTAssertTrue(element("team.kickoff", in: app).waitForExistence(timeout: 10))
+        element("team.kickoff", in: app).tap()
         let action = element("sandbox.action", in: app)
         XCTAssertTrue(action.waitForExistence(timeout: 10))
         assertValue(action, contains: "players:22;")
@@ -225,6 +229,8 @@ final class CareerUITests: XCTestCase {
 
     private func playShortFixture(in app: XCUIApplication, controlledClubName: String = "Liverpool") {
         element("career.play", in: app).tap()
+        XCTAssertTrue(element("team.kickoff", in: app).waitForExistence(timeout: 10))
+        element("team.kickoff", in: app).tap()
         let action = element("sandbox.action", in: app)
         XCTAssertTrue(action.waitForExistence(timeout: 10))
         assertValue(action, contains: "players:22;")

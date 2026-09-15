@@ -5,6 +5,7 @@ import SwiftUI
 @Observable
 final class GameSession {
     @ObservationIgnored let scene: GameScene
+    @ObservationIgnored var onPrepareMatch: (() -> Void)?
     let configuration: FriendlyMatchConfiguration?
     let careerContext: CareerMatchContext?
     let worldCupContext: WorldCupMatchContext?
@@ -40,6 +41,7 @@ final class GameSession {
         didSet { scene.hapticsEnabled = hapticsEnabled }
     }
     var userPaused = false { didSet { reconcilePause() } }
+    var showingTeamManagement = false { didSet { reconcilePause() } }
     var showingSettings = false { didSet { reconcilePause() } }
     var showingHelp = false { didSet { reconcilePause() } }
     var active = true { didSet { reconcilePause() } }
@@ -242,7 +244,13 @@ final class GameSession {
         }
     }
 
-    func reset() { guard !isCompetitionMatch else { return }; scene.resetSandbox() }
+    func reset() {
+        guard !isCompetitionMatch else { return }
+        if isClubMatch, let onPrepareMatch {
+            showingSettings = false
+            onPrepareMatch()
+        } else { scene.resetSandbox() }
+    }
     func resetScore() { guard !isCompetitionMatch else { return }; scene.resetSandbox(clearScore: true) }
     func restoreDefaults() { tuning = .defaults }
     func resumeAfterHalfTime() {
@@ -427,7 +435,7 @@ final class GameSession {
 #endif
 
     private func reconcilePause() {
-        scene.setGameplayPaused(userPaused || showingSettings || showingHelp || !active)
+        scene.setGameplayPaused(userPaused || showingSettings || showingHelp || showingTeamManagement || !active)
     }
 }
 

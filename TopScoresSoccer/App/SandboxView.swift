@@ -14,9 +14,11 @@ struct SandboxView: View {
 
     init(configuration: FriendlyMatchConfiguration? = nil, startingMode: ExerciseMode? = nil,
          careerContext: CareerMatchContext? = nil, onCareerComplete: ((Int, Int) throws -> Void)? = nil,
-         onExit: (() -> Void)? = nil) {
-        _session = State(initialValue: GameSession(configuration: configuration, startingMode: startingMode,
-                                                careerContext: careerContext, onCareerComplete: onCareerComplete))
+         onRematch: (() -> Void)? = nil, onExit: (() -> Void)? = nil) {
+        let initialSession = GameSession(configuration: configuration, startingMode: startingMode,
+                                         careerContext: careerContext, onCareerComplete: onCareerComplete)
+        initialSession.onPrepareMatch = onRematch
+        _session = State(initialValue: initialSession)
         self.onExit = onExit
     }
 
@@ -54,6 +56,10 @@ struct SandboxView: View {
                             .foregroundStyle(lime)
                             .accessibilityIdentifier("sandbox.status")
                     }
+                    if session.isClubMatch {
+                        Text("\(session.scene.simulation.playStyle(for: .blue).title)\(session.scene.simulation.pendingSubstitutions.isEmpty ? "" : " · Subs pending")")
+                            .font(.caption).foregroundStyle(.white.opacity(0.8))
+                    }
                     if let notice = session.hud.substitutionNotice {
                         Text(notice).font(.footnote).foregroundStyle(.yellow)
                             .multilineTextAlignment(.center)
@@ -87,10 +93,14 @@ struct SandboxView: View {
                 .padding(.top, 126).padding(.leading, 18)
                 .allowsHitTesting(false)
             }
-            if session.userPaused && !session.showingSettings && !session.showingHelp && !matchEnded {
+            if session.userPaused && !session.showingSettings && !session.showingHelp && !session.showingTeamManagement && !matchEnded {
                 VStack(spacing: 18) {
                     Image(systemName: "pause.circle").font(.system(size: 36, weight: .light))
                     Text("Take a breather").font(.title2.bold())
+                    if session.isClubMatch {
+                        Button("Team management", systemImage: "person.3.sequence.fill") { session.showingTeamManagement = true }
+                            .accessibilityIdentifier("match.team-management")
+                    }
                     Button("Back to the pitch") { session.userPaused = false }
                         .buttonStyle(.borderedProminent).tint(lime).foregroundStyle(.black)
                         .accessibilityIdentifier("sandbox.resume")
@@ -104,7 +114,7 @@ struct SandboxView: View {
                 .background(Color(red: 0.04, green: 0.12, blue: 0.12).opacity(0.96),
                             in: RoundedRectangle(cornerRadius: 24))
             }
-            if session.hud.phase == .halfTime && !session.showingSettings && !session.showingHelp {
+            if session.hud.phase == .halfTime && !session.showingSettings && !session.showingHelp && !session.showingTeamManagement {
                 Color.black.opacity(0.55).ignoresSafeArea().accessibilityHidden(true)
                 VStack(spacing: 18) {
                     Text("Half-time").font(.title.bold())
@@ -113,6 +123,10 @@ struct SandboxView: View {
                     Text("Teams swap ends. You will attack the \(session.hud.attacksTopGoal ? "bottom" : "top") goal.")
                         .font(.subheadline).multilineTextAlignment(.center)
                         .accessibilityIdentifier("match.half-time-direction")
+                    if session.isClubMatch {
+                        Button("Team management", systemImage: "person.3.sequence.fill") { session.showingTeamManagement = true }
+                            .accessibilityIdentifier("match.halftime-team")
+                    }
                     Button("Start second half") { session.resumeAfterHalfTime() }
                         .buttonStyle(.borderedProminent).tint(lime).foregroundStyle(.black)
                         .accessibilityIdentifier("match.second-half")
@@ -122,10 +136,10 @@ struct SandboxView: View {
                 .background(Color(red: 0.04, green: 0.12, blue: 0.12), in: RoundedRectangle(cornerRadius: 24))
                 .padding(20)
             }
-            if session.penaltyShootout != nil && !session.showingSettings && !session.showingHelp {
+            if session.penaltyShootout != nil && !session.showingSettings && !session.showingHelp && !session.showingTeamManagement {
                 Color.black.opacity(0.62).ignoresSafeArea().accessibilityHidden(true)
                 penaltyShootoutCard
-            } else if matchEnded && !session.showingSettings && !session.showingHelp {
+            } else if matchEnded && !session.showingSettings && !session.showingHelp && !session.showingTeamManagement {
                 Color.black.opacity(0.48).ignoresSafeArea()
                     .accessibilityHidden(true)
                 matchResultCard
@@ -133,10 +147,11 @@ struct SandboxView: View {
         }
         .persistentSystemOverlays(.hidden)
         .statusBarHidden()
+        .sheet(isPresented: $session.showingTeamManagement) { teamManagement }
         .sheet(isPresented: $session.showingSettings) { TuningView(session: session) }
         .sheet(isPresented: $session.showingHelp) { helpView }
         .sheet(isPresented: Binding(
-            get: { session.hud.pendingInjuryID != nil && !session.showingSettings && !session.showingHelp },
+            get: { session.hud.pendingInjuryID != nil && !session.showingSettings && !session.showingHelp && !session.showingTeamManagement },
             set: { _ in })) {
             injuryReplacementView.interactiveDismissDisabled()
         }
@@ -158,6 +173,27 @@ struct SandboxView: View {
         .onDisappear { session.active = false }
     }
 
+    @ViewBuilder private var teamManagement: some View {
+        if let current = session.scene.simulation.liveHomeLineup,
+           let projected = session.scene.simulation.projectedHomeLineup,
+           let configuration = session.configuration {
+            TeamManagementView(lineup: projected,
+                kit: MatchKits.resolveForPlay(configuration: configuration,
+                    userIsAway: session.careerContext?.userIsAway ?? session.worldCupContext?.userIsAway ?? false).home,
+                actionTitle: "Apply changes", actualLineup: current,
+                matchPlayers: session.scene.simulation.footballers.filter { $0.team == .blue },
+                unavailableIDs: session.scene.simulation.unavailableSquadIDs,
+                substitutionsUsed: session.scene.simulation.substitutionsUsed[.blue] ?? 0,
+                substitutions: session.scene.simulation.pendingSubstitutions) { lineup, changes in
+                    guard session.scene.simulation.updateTeamManagement(lineup, substitutions: changes) else {
+                        throw TeamManagementError.staleSelection
+                    }
+                    session.scene.refreshHUD()
+                    session.showingTeamManagement = false
+                }
+        }
+    }
+
     private var injuryReplacementView: some View {
         NavigationStack {
             List {
@@ -172,16 +208,22 @@ struct SandboxView: View {
                         Button {
                             session.substituteInjuredPlayer(with: player.id)
                         } label: {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(player.name).font(.headline)
-                                Text("\(player.role) · \(player.jerseyNumber.map { "No. \($0) · " } ?? "")Rating \(Int(player.effectiveRating))")
-                                    .font(.subheadline).foregroundStyle(Color.secondary)
-                            }.padding(.vertical, 5)
+                            if let configuration = session.configuration {
+                                TeamPlayerRow(player: player, kit: MatchKits.resolveForPlay(configuration: configuration,
+                                    userIsAway: session.careerContext?.userIsAway ?? session.worldCupContext?.userIsAway ?? false).home)
+                            } else {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(player.name).font(.headline)
+                                    PlayerStars(player: player).font(.caption)
+                                }.padding(.vertical, 5)
+                            }
                         }
                         .accessibilityIdentifier("injury.replace.\(player.id)")
                     }
                     if session.hud.injuryReplacements.isEmpty {
-                        Text("No eligible squad players remain. Your team will continue with one fewer player.")
+                        Text((session.scene.simulation.substitutionsUsed[.blue] ?? 0) >= 5
+                             ? "All five substitutions have been used. Your team will continue with one fewer player."
+                             : "No eligible squad players remain. Your team will continue with one fewer player.")
                         Button("Continue match") { session.continueWithoutReplacement() }
                             .accessibilityIdentifier("injury.continue")
                     }
@@ -665,4 +707,9 @@ struct SandboxView: View {
 
 #Preview("5v5 match", traits: .portrait) {
     SandboxView()
+}
+
+private enum TeamManagementError: LocalizedError {
+    case staleSelection
+    var errorDescription: String? { "The team has changed. Close team management and try again." }
 }

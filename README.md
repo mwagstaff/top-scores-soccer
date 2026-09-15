@@ -166,3 +166,11 @@ The top bar contains **How to play**, **Pause** and **Tune gameplay**. In tuning
 Use the [match checklist and playtest guide](Documentation/PLAYTEST.md). It records validation status, the tuning ranges and what feedback will be useful. For automated checks, select an iPhone simulator and choose **Product → Test** (**⌘U**).
 
 Play a complete match with the accepted control defaults. Check spacing, keeper saves and distribution, clear restart ownership, the stopped clock during breaks, and a clean full-time result followed by Play again. Keep an eye on player selection and performance with all 22 players. Use the retained drills for isolated mechanics checks. Controller support, voluntary tactical substitutions and multiplayer remain deferred.
+
+### Team management
+
+Friendly, Career and World Cup fixtures now open **Match preparation** before kick-off. Choose Defensive, Normal or Attacking, tap a player on the pitch or in the starting-XI list to replace them, and review their half-star quality rating. Automatic formation follows the selected players (for example, replacing a midfielder with a striker changes 4–4–2 to 4–3–3). Turn it off to choose a formation while retaining the selected XI. Eight common formations are supported; unusual squads retain all selected players and label out-of-position assignments.
+
+Open **Pause → Team management**, or use Team management at half-time, to change tactics and queue substitutions. The clock pauses while editing. Changes to style apply when confirmed; substitutions take effect at the next stoppage, after any foul treatment. Each side has five substitutions across the whole match, including extra time and injury replacements. Sent-off players cannot be replaced and replaced players cannot return. Pending changes can be edited or cancelled.
+
+Pre-match selections are remembered per Friendly team or competition save. Match substitutions and tactical adjustments stay within that match. Existing saves load with Normal tactics and automatic formation enabled. Stars use a fixed scale from 55 (one star) to 95 (five stars), rounded to half-stars; missing ratings retain the existing estimated-rating label. Player icons are cached snapshots of the same artwork used on the pitch.

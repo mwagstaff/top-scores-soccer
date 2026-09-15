@@ -88,19 +88,29 @@ struct FormationSlot: Sendable {
 }
 
 enum MatchFormation: String, CaseIterable, Codable, Identifiable, Sendable {
-    case fourFourTwo, fourThreeThree, fourTwoThreeOne
+    case fourFourTwo, fourThreeThree, fourTwoThreeOne, threeFiveTwo, threeFourThree, fiveThreeTwo, fiveFourOne, fourFiveOne
     var id: String { rawValue }
     var title: String {
         switch self {
         case .fourFourTwo: "4–4–2"
         case .fourThreeThree: "4–3–3"
         case .fourTwoThreeOne: "4–2–3–1"
+        case .threeFiveTwo: "3–5–2"
+        case .threeFourThree: "3–4–3"
+        case .fiveThreeTwo: "5–3–2"
+        case .fiveFourOne: "5–4–1"
+        case .fourFiveOne: "4–5–1"
         }
     }
 
     var slots: [FormationSlot] {
         let goalkeeper = FormationSlot(role: "G", position: Vector2(x: 0, y: -46))
-        let defenders = [-24.0, -8, 8, 24].map { FormationSlot(role: "D", position: Vector2(x: $0, y: -28)) }
+        let defenderXs: [Double] = switch self {
+        case .threeFiveTwo, .threeFourThree: [-20, 0, 20]
+        case .fiveThreeTwo, .fiveFourOne: [-25, -13, 0, 13, 25]
+        default: [-24, -8, 8, 24]
+        }
+        let defenders = defenderXs.map { FormationSlot(role: "D", position: Vector2(x: $0, y: -28)) }
         let outfield: [FormationSlot]
         switch self {
         case .fourFourTwo:
@@ -109,6 +119,16 @@ enum MatchFormation: String, CaseIterable, Codable, Identifiable, Sendable {
         case .fourThreeThree:
             outfield = [-16.0, 0, 16].map { FormationSlot(role: "M", position: Vector2(x: $0, y: -12)) }
                 + [-23.0, 0, 23].map { FormationSlot(role: "F", position: Vector2(x: $0, y: 12)) }
+        case .threeFiveTwo:
+            outfield = Self.line(5, role: "M", y: -10) + Self.line(2, role: "F", y: 12)
+        case .threeFourThree:
+            outfield = Self.line(4, role: "M", y: -10) + Self.line(3, role: "F", y: 12)
+        case .fiveThreeTwo:
+            outfield = Self.line(3, role: "M", y: -10) + Self.line(2, role: "F", y: 12)
+        case .fiveFourOne:
+            outfield = Self.line(4, role: "M", y: -10) + Self.line(1, role: "F", y: 17)
+        case .fourFiveOne:
+            outfield = Self.line(5, role: "M", y: -10) + Self.line(1, role: "F", y: 17)
         case .fourTwoThreeOne:
             outfield = [-10.0, 10].map { FormationSlot(role: "M", position: Vector2(x: $0, y: -17)) }
                 + [-22.0, 0, 22].map { FormationSlot(role: "M", position: Vector2(x: $0, y: 2)) }
@@ -118,11 +138,23 @@ enum MatchFormation: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
+private extension MatchFormation {
+    static func line(_ count: Int, role: String, y: Double) -> [FormationSlot] {
+        (0..<count).map { index in
+            let width = count == 2 ? 9.0 : 23.0
+            let x = count == 1 ? 0 : -width + Double(index) * width * 2 / Double(count - 1)
+            return FormationSlot(role: role, position: Vector2(x: x, y: y))
+        }
+    }
+}
+
 struct ClubLineup: Hashable, Sendable {
     var team: ClubTeam
     var formation: MatchFormation
     /// Player order matches formation.slots, with the goalkeeper first.
     var players: [ClubPlayer]
+    var style: PlayStyle = .normal
+    var automaticFormation = true
 
     var isValid: Bool {
         players.count == 11 && Set(players.map(\.id)).count == 11
@@ -159,6 +191,7 @@ struct ClubLineup: Hashable, Sendable {
             result.players.swapAt(slot, existingSlot)
         } else {
             result.players[slot] = replacement
+            if result.isValid && result.automaticFormation { result = result.balanced() }
         }
         return result.isValid ? result : nil
     }

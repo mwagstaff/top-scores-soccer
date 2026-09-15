@@ -20,6 +20,12 @@ final class SplitControlPresentationTests: XCTestCase {
                 XCTAssertTrue(input.bounds.contains(element.accessibilityFrameInContainerSpace))
                 XCTAssertGreaterThanOrEqual(element.accessibilityFrameInContainerSpace.width, 44)
             }
+            let expectedLift = min(32, max(24, size.height * 0.03))
+            XCTAssertEqual(pass.accessibilityFrameInContainerSpace.midY, size.height - 98 - expectedLift,
+                           accuracy: 0.001, "Both action buttons should sit comfortably above the bottom edge.")
+            XCTAssertEqual(pass.accessibilityFrameInContainerSpace.midY - shoot.accessibilityFrameInContainerSpace.midY,
+                           shoot.accessibilityFrameInContainerSpace.height * 0.30, accuracy: 0.001,
+                           "The primary action should sit 30% of one button above Short Pass.")
             XCTAssertFalse(pass.accessibilityFrameInContainerSpace.intersects(shoot.accessibilityFrameInContainerSpace))
             XCTAssertEqual(input.touchRole(at: CGPoint(x: pass.accessibilityFrameInContainerSpace.midX,
                 y: pass.accessibilityFrameInContainerSpace.midY)), .pass)

@@ -72,12 +72,15 @@ struct CareerView: View {
                 }
             }
             .fullScreenCover(item: $presentedMatch) { ticket in
-                SandboxView(configuration: ticket.configuration,
+                PreMatchGate(configuration: ticket.configuration, userIsAway: ticket.userIsAway,
+                             onExit: { presentedMatch = nil }, onSave: { try career.updateLineup($0) }) { prepared, playing in
+                SandboxView(configuration: prepared,
                             careerContext: CareerMatchContext(fixtureTitle: "Matchweek \(ticket.fixture.round) · \(ticket.userIsAway ? "Away" : "Home")",
                                                              userIsAway: ticket.userIsAway),
                             onCareerComplete: { userGoals, opponentGoals in
                     _ = try career.completeFixture(ticketID: ticket.id, userGoals: userGoals, opponentGoals: opponentGoals)
                 }, onExit: { presentedMatch = nil })
+                }
             }
             .confirmationDialog("Replace your saved career?", isPresented: replacementWithoutSheet,
                                 titleVisibility: .visible) {

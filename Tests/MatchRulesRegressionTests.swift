@@ -97,6 +97,27 @@ final class MatchRulesRegressionTests: XCTestCase {
         XCTAssertNil(simulation.goalkeeperPossessionTeam)
     }
 
+    func testAttackerCanWalkBallIntoEmptyGoalAfterBeatingKeeper() {
+        var simulation = liveMatch()
+        let attacker = simulation.selectedPlayerID
+        simulation.roster[attacker].state.position = Vector2(x: 0, y: Pitch.length / 2 - 3)
+        simulation.roster[attacker].state.velocity = .zero
+        simulation.roster[attacker].state.facing = .up
+        simulation.roster[9].state.position = Vector2(x: 18, y: Pitch.length / 2 - 2)
+        simulation.ball = BallState(position: simulation.roster[attacker].state.position + .up * 1.25,
+                                    velocity: .zero, mode: .free)
+        simulation.movement = .up
+
+        for _ in 0..<180 where simulation.phase == .playing {
+            simulation.step(dt: tick)
+        }
+
+        XCTAssertEqual(simulation.phase, .goal(north: true))
+        XCTAssertEqual(simulation.northGoals, 1)
+        XCTAssertEqual(simulation.kickCount, 1,
+                       "The kickoff should remain the only kick; walking the ball in must not require another.")
+    }
+
     func testBlueKeeperManuallyThrowsToAnOutfielderAndHandsOverMovementControl() {
         var simulation = liveMatch()
         simulation.ball = BallState(position: simulation.roster[5].state.position + .up,

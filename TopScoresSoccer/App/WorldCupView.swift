@@ -58,7 +58,9 @@ struct WorldCupView: View {
                 }
             }
             .fullScreenCover(item: $presentedMatch) { ticket in
-                SandboxView(configuration: ticket.configuration,
+                PreMatchGate(configuration: ticket.configuration, userIsAway: ticket.userIsAway,
+                             onExit: { presentedMatch = nil }, onSave: { try store.updateLineup($0) }) { prepared, playing in
+                SandboxView(configuration: prepared,
                     worldCupContext: .init(fixtureTitle: ticket.fixture.stage == .group
                         ? "Group \(ticket.fixture.group ?? "") · Matchday \(ticket.fixture.matchday ?? 1)"
                         : ticket.fixture.stage.title,
@@ -70,6 +72,7 @@ struct WorldCupView: View {
                         presentedMatch = nil
                         presentSavedCelebrationIfNeeded()
                     })
+                }
             }
             .fullScreenCover(item: $celebration) { presentation in
                 WorldCupCelebrationView(teamName: presentation.teamName) {

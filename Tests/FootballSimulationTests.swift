@@ -51,6 +51,50 @@ final class FootballSimulationTests: XCTestCase {
         XCTAssertGreaterThan(gaps.max()! - gaps.min()!, 0.25, "The ball must not be attached at a fixed offset.")
     }
 
+    func testControlledPlayerCanWalkBallIntoEmptyGoalWithoutKicking() {
+        var simulation = FootballSimulation()
+        simulation.player.position = Vector2(x: 0, y: Pitch.length / 2 - 3)
+        simulation.player.velocity = .zero
+        simulation.player.facing = .up
+        simulation.ball = BallState(position: simulation.player.position + .up * 1.25,
+                                    velocity: .zero, mode: .controlled)
+        simulation.movement = .up
+
+        for _ in 0..<180 where simulation.phase == .playing {
+            simulation.step(dt: tick)
+        }
+
+        XCTAssertEqual(simulation.phase, .goal(north: true))
+        XCTAssertEqual(simulation.northGoals, 1)
+        XCTAssertEqual(simulation.kickCount, 0, "Crossing the goal line under control must not require a shot.")
+    }
+
+    func testPlayerBoundaryHasAnOpeningAtTheGoalMouthButStillBlocksBesideIt() {
+        let fieldLimit = Pitch.length / 2 - Pitch.playerRadius
+
+        var throughGoal = FootballSimulation()
+        throughGoal.player.position = Vector2(x: 0, y: fieldLimit)
+        throughGoal.player.velocity = .up * throughGoal.tuning.playerMaxSpeed
+        throughGoal.player.facing = .up
+        throughGoal.ball = BallState(position: throughGoal.player.position - .up,
+                                     velocity: .up * throughGoal.tuning.playerMaxSpeed, mode: .controlled)
+        throughGoal.movement = .up
+        throughGoal.step(dt: tick)
+        XCTAssertGreaterThan(throughGoal.player.position.y, fieldLimit,
+                             "The end-line clamp must be open between the posts.")
+
+        var besideGoal = FootballSimulation()
+        besideGoal.player.position = Vector2(x: Pitch.goalWidth / 2 + 1, y: fieldLimit)
+        besideGoal.player.velocity = .up * besideGoal.tuning.playerMaxSpeed
+        besideGoal.player.facing = .up
+        besideGoal.ball = BallState(position: besideGoal.player.position - .up,
+                                    velocity: .up * besideGoal.tuning.playerMaxSpeed, mode: .controlled)
+        besideGoal.movement = .up
+        besideGoal.step(dt: tick)
+        XCTAssertEqual(besideGoal.player.position.y, fieldLimit, accuracy: 0.000001,
+                       "The physical end line must remain closed outside the goal mouth.")
+    }
+
     func testSharpReversalCanExposeBallAndRunningPlayerCanRecoverIt() {
         var simulation = FootballSimulation()
         simulation.movement = .up
@@ -1242,7 +1286,11 @@ extension FootballSimulationTests {
             for footballer in simulation.footballers {
                 XCTAssertTrue(footballer.state.position.x.isFinite && footballer.state.position.y.isFinite)
                 XCTAssertLessThanOrEqual(abs(footballer.state.position.x), Pitch.width / 2 - Pitch.playerRadius + 0.001)
-                XCTAssertLessThanOrEqual(abs(footballer.state.position.y), Pitch.length / 2 - Pitch.playerRadius + 0.001)
+                let insideGoalMouth = abs(footballer.state.position.x)
+                    <= Pitch.goalWidth / 2 - Pitch.postRadius - Pitch.playerRadius
+                let yLimit = Pitch.length / 2
+                    + (insideGoalMouth ? Pitch.goalDepth : 0) - Pitch.playerRadius
+                XCTAssertLessThanOrEqual(abs(footballer.state.position.y), yLimit + 0.001)
                 XCTAssertLessThanOrEqual(footballer.state.velocity.length,
                                         max(simulation.tuning.playerMaxSpeed * simulation.tuning.offBallSpeedBoost, simulation.tuning.slideSpeed) + 0.001)
             }

@@ -59,6 +59,8 @@ struct CareerSeasonArchive: Codable, Hashable, Identifiable, Sendable {
 struct CareerLineupSelection: Codable, Hashable, Sendable {
     var formation: MatchFormation
     var playerIDs: [String]
+    var style: PlayStyle? = nil
+    var automaticFormation: Bool? = nil
 }
 
 /// Configuration uses the controlled club as "home" because the arcade engine controls blue.
@@ -91,7 +93,8 @@ struct CareerSave: Codable, Hashable, Sendable {
         let team = selectedClub
         let byID = Dictionary(uniqueKeysWithValues: team.players.map { ($0.id, $0) })
         return ClubLineup(team: team, formation: lineupSelection.formation,
-                          players: lineupSelection.playerIDs.compactMap { byID[$0] })
+                          players: lineupSelection.playerIDs.compactMap { byID[$0] },
+                          style: lineupSelection.style ?? .normal, automaticFormation: lineupSelection.automaticFormation ?? true)
     }
     var nextFixture: CareerFixture? {
         fixtures.first { $0.result == nil && ($0.homeClubID == selectedClubID || $0.awayClubID == selectedClubID) }
@@ -131,7 +134,8 @@ struct CareerSave: Codable, Hashable, Sendable {
         // Compare full player values as well as IDs: live profiles must not leak into a frozen career.
         guard selection.team == selectedClub, selection.isValid,
               selection.players.allSatisfy({ selectedClub.players.contains($0) }) else { throw CareerError.invalidLineup }
-        lineupSelection = .init(formation: selection.formation, playerIDs: selection.players.map(\.id))
+        lineupSelection = .init(formation: selection.formation, playerIDs: selection.players.map(\.id),
+                                style: selection.style, automaticFormation: selection.automaticFormation)
     }
 
     /// Commits all ten games in a round together. Identical repeat callbacks are harmless.
