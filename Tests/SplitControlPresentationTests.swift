@@ -14,6 +14,8 @@ final class SplitControlPresentationTests: XCTestCase {
             let elements = try XCTUnwrap(input.accessibilityElements as? [UIAccessibilityElement])
             let pass = try XCTUnwrap(elements.first { $0.accessibilityIdentifier == "sandbox.pass" })
             let shoot = try XCTUnwrap(elements.first { $0.accessibilityIdentifier == "sandbox.action" })
+            XCTAssertNotNil(UIImage(systemName: input.passIconName))
+            XCTAssertNotNil(UIImage(systemName: input.actionIconName))
             for element in [pass, shoot] {
                 XCTAssertTrue(input.bounds.contains(element.accessibilityFrameInContainerSpace))
                 XCTAssertGreaterThanOrEqual(element.accessibilityFrameInContainerSpace.width, 44)

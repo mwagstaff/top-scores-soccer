@@ -96,7 +96,10 @@ final class KickPresentationTests: XCTestCase {
         scene.onHUDUpdate = { hud = $0 }
         scene.setMovement(.up, timestamp: 350)
         refresh(input, scene: scene)
-        XCTAssertEqual(input.actionTitle, "LONG BALL")
+        XCTAssertEqual(input.actionTitle, "LONG PASS")
+        XCTAssertEqual(input.actionIconName, "arrow.up")
+        XCTAssertEqual(input.passTitle, "SHORT PASS")
+        XCTAssertEqual(input.passIconName, "arrow.right")
         XCTAssertTrue(hud.detail.contains("PASS to"))
         let action = try XCTUnwrap(elements(input).first { $0.accessibilityIdentifier == "sandbox.action" })
         if !ProcessInfo.processInfo.arguments.contains("--uitesting") {
@@ -108,7 +111,7 @@ final class KickPresentationTests: XCTestCase {
         XCTAssertEqual(scene.powerFeedback?.kind, .longKick)
         XCTAssertNil(scene.powerFeedback?.sweetSpot)
         XCTAssertEqual(hud.status, "HOLD FOR HEIGHT")
-        XCTAssertEqual(input.actionTitle, "LONG BALL")
+        XCTAssertEqual(input.actionTitle, "LONG PASS")
         attach(input, named: "Goal-kick meter — hold high and long")
         scene.releaseAction(heldFor: 0.85)
         XCTAssertEqual(scene.simulation.lastKickKind, "long goal kick")

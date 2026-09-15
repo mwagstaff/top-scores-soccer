@@ -40,6 +40,8 @@ enum GoalkeeperAI {
         var diveDirection = Vector2.zero
         var recoveryPoseExtent = 0.0
         var holdingElapsed = 0.0
+        var shotReadElapsed = 0.0
+        var lastShotDirection = Vector2.zero
     }
 
     struct ContactProfile: Equatable, Sendable {
@@ -118,7 +120,19 @@ enum GoalkeeperAI {
         }
         state.diveRemaining = max(0, state.diveRemaining - dt)
         state.recoveryRemaining = max(0, state.recoveryRemaining - dt)
-        let goalwardShot = ball.mode == .shot && ball.velocity.y * attack < -5
+        let goalwardShot = !ownsBall && ball.mode == .shot && ball.velocity.y * attack < -5
+        if goalwardShot {
+            let direction = ball.velocity.normalized
+            let isStable = state.lastShotDirection.length <= 0.001
+                || (direction - state.lastShotDirection).length <= 0.0025
+            state.shotReadElapsed = isStable
+                ? min(1, state.shotReadElapsed + dt)
+                : max(0, state.shotReadElapsed - dt * 3)
+            state.lastShotDirection = direction
+        } else {
+            state.shotReadElapsed = 0
+            state.lastShotDirection = .zero
+        }
         if ownsBall {
             state.diveRemaining = 0
             state.holdingElapsed += dt
@@ -152,7 +166,15 @@ enum GoalkeeperAI {
                     gravity: configuration.gravity)
                 if abs(crossingX) <= goalLimit + configuration.diveReach,
                    arrivalHeight <= configuration.standingSaveHeight + 0.25 {
-                    let read = min(0.82, max(0.18, (crossingTime - 0.08) / 0.82))
+                    let widthFraction = min(1, abs(crossingX) / max(0.1, goalLimit))
+                    let placementReadability = 1 - 0.45 * pow(widthFraction, 2)
+                    let settled = min(1, state.shotReadElapsed / 0.18)
+                    let baseRead = min(0.82, max(0.18, (crossingTime - 0.08) / 0.82))
+                    // A stable shot gives the keeper an increasingly reliable line to follow.
+                    // This is strongest through the middle; bending or post-bound shots retain
+                    // more of the attacker's advantage.
+                    let read = min(0.98, baseRead
+                        + (1 - baseRead) * settled * placementReadability)
                     target.x = min(goalLimit, max(-goalLimit,
                         target.x * (1 - read) + crossingX * read))
                 }
@@ -173,7 +195,13 @@ enum GoalkeeperAI {
             let crossingTime = (keeper.position.y - ball.position.y) / ball.velocity.y
             let crossingX = ball.position.x + ball.velocity.x * crossingTime
             let lateral = crossingX - keeper.position.x
-            if crossingTime >= 0, crossingTime <= configuration.diveLookAhead,
+            let goalLimit = Pitch.goalWidth / 2 - Pitch.ballRadius
+            let widthFraction = min(1, abs(crossingX) / max(0.1, goalLimit))
+            let placementReadability = 1 - 0.45 * pow(widthFraction, 2)
+            let settled = min(1, state.shotReadElapsed / 0.18)
+            let anticipatedLookAhead = configuration.diveLookAhead
+                + 0.16 * settled * placementReadability
+            if crossingTime >= 0, crossingTime <= anticipatedLookAhead,
                abs(crossingX) <= Pitch.goalWidth / 2 + configuration.standingReach,
                abs(lateral) >= configuration.minimumDiveOffset,
                abs(lateral) <= configuration.maximumDiveOffset,

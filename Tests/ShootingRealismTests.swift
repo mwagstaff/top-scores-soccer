@@ -9,7 +9,7 @@ final class ShootingRealismTests: XCTestCase {
     }
 
     private func matchShot(distance: Double, aim: Vector2, aftertouch: Vector2?,
-                           delayFrames: Int = 0) -> FootballSimulation {
+                           delayFrames: Int = 0, keeperStartX: Double = 0) -> FootballSimulation {
         var tuning = GameplayTuning.defaults
         tuning.aiSpeedScale = 0
         var simulation = FootballSimulation(tuning: tuning, mode: .match,
@@ -31,7 +31,8 @@ final class ShootingRealismTests: XCTestCase {
         simulation.ball = BallState(position: goal - .up * distance, mode: .controlled)
         simulation.roster[shooter].state.position = simulation.ball.position - .up * 1.1
         simulation.roster[shooter].state.facing = .up
-        simulation.roster[keeper].state.position = Vector2(x: 0, y: Pitch.length / 2 - 2.2)
+        simulation.roster[keeper].state.position = Vector2(x: keeperStartX,
+                                                           y: Pitch.length / 2 - 2.2)
         simulation.roster[keeper].state.facing = -.up
         let profile = KickMechanics.distancePower(distance: distance, heldFor: 0,
                                                    tuning: tuning)
@@ -146,6 +147,30 @@ final class ShootingRealismTests: XCTestCase {
                        "A readable central shot from 30 yards should normally be saved.")
         XCTAssertEqual(curled.northGoals, 1,
                        "A well-timed, bounded swerve toward the post must leave a rare worldie possible.")
+    }
+
+    func testReadableLongShotsInsideTheCentralHalfAreSavedFromEitherSide() {
+        let distance = 27.432
+        for targetX in [-1.5, 1.5] {
+            let aim = Vector2(x: targetX / distance, y: 1).normalized
+            let simulation = matchShot(distance: distance, aim: aim, aftertouch: nil,
+                                       keeperStartX: -targetX * 0.8)
+            XCTAssertEqual(simulation.goalkeeperSaveCount, 1,
+                           "A keeper with time to read a long shot should cover the central half of the goal.")
+            XCTAssertEqual(simulation.northGoals, 0)
+        }
+    }
+
+    func testReadableLongShotsAwayFromTheCornersAreSavedOnEitherSide() {
+        for distance in [27.432, 35] {
+            for targetX in [-2.4, 2.4] {
+                let aim = Vector2(x: targetX / distance, y: 1).normalized
+                let simulation = matchShot(distance: distance, aim: aim, aftertouch: nil)
+                XCTAssertEqual(simulation.goalkeeperSaveCount, 1,
+                               "Long-range goals should require placement genuinely close to a corner.")
+                XCTAssertEqual(simulation.northGoals, 0)
+            }
+        }
     }
 
 }

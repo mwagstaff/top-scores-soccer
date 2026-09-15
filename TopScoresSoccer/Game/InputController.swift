@@ -54,8 +54,8 @@ final class InputController: UIView {
         let shootingElement = FootballActionElement(accessibilityContainer: self)
         shootingElement.activate = { [weak self] in self?.activateButton(.shoot, heldFor: 0.08) ?? false }
         actionElement = shootingElement
-        actionElement.accessibilityLabel = "Shoot or long ball"
-        actionElement.accessibilityHint = "Within 35 metres of goal, tap to shoot or hold and release for power. Outside that range, hold and release for a long ball or cross. Off the ball, press to slide tackle. When receiving, prepare a shot or header."
+        actionElement.accessibilityLabel = "Shoot or long pass"
+        actionElement.accessibilityHint = "Within 35 metres of goal, tap to shoot or hold and release for power. Outside that range, hold and release for a long pass or cross. Off the ball, press to slide tackle. When receiving, prepare a shot or header."
         actionElement.accessibilityIdentifier = "sandbox.action"
         standardActionHint = actionElement.accessibilityHint
         actionElement.accessibilityTraits = .button
@@ -243,11 +243,11 @@ final class InputController: UIView {
             : standardActionHint
         if !ProcessInfo.processInfo.arguments.contains("--uitesting"), power == nil {
             actionElement.accessibilityValue = waitingForAutomaticPlay ? "Opposition restarting; move into position"
-                : takingGoalKick ? "Your keeper is taking a goal kick. PASS plays short; hold LONG BALL for distance."
+                : takingGoalKick ? "Your keeper is taking a goal kick. SHORT PASS plays short; hold LONG PASS for distance."
                 : holdingKeeper ? "Your keeper has the ball. SHORT THROW finds a nearby teammate; hold LONG THROW for distance."
-                : controllingReceiver ? "You control the intended receiver. Steer to move, or centre to meet the ball. PASS or SHOOT prepares the next touch."
-                : canReceive ? "Incoming ball. PASS or SHOOT prepares your next touch."
-                : hasBall ? "PASS plays short. Hold the shooting button for power, then release."
+                : controllingReceiver ? "You control the intended receiver. Steer to move, or centre to meet the ball. SHORT PASS or SHOOT prepares the next touch."
+                : canReceive ? "Incoming ball. SHORT PASS or SHOOT prepares your next touch."
+                : hasBall ? "SHORT PASS plays short. Hold the other action button for power, then release."
                 : "Press BLOCK for a standing tackle or SLIDE for a sliding tackle."
         }
         passElement.accessibilityLabel = passTitle.capitalized
@@ -378,13 +378,14 @@ final class InputController: UIView {
                      color: .white.withAlphaComponent(0.50))
         }
 
-        drawActionButton(title: actionTitle, subtitle: hasBall || canReceive ? "HOLD / RELEASE" : "PRESS",
+        drawActionButton(title: actionTitle, symbolName: actionIconName,
                          center: actionCenter, button: .shoot, context: context)
-        drawActionButton(title: passTitle, subtitle: "PRESS", center: passCenter, button: .pass, context: context)
+        drawActionButton(title: passTitle, symbolName: passIconName,
+                         center: passCenter, button: .pass, context: context)
         if let power { drawPower(power, in: context) }
     }
 
-    private func drawActionButton(title: String, subtitle: String, center: CGPoint,
+    private func drawActionButton(title: String, symbolName: String, center: CGPoint,
                                   button: PlayerActionButton, context: CGContext) {
         let pressed = actionTouch != nil && pressedButton == button
         let disabled = waitingForAutomaticPlay || (button == .pass && takingPenalty)
@@ -401,35 +402,58 @@ final class InputController: UIView {
             context.fillEllipse(in: CGRect(x: center.x - actionRadius, y: center.y - actionRadius,
                                            width: actionRadius * 2, height: actionRadius * 2))
         }
-        drawText(title, at: CGPoint(x: center.x, y: center.y - 7), size: title.count > 8 ? 10 : 13,
-                 color: color.withAlphaComponent(disabled ? 0.4 : 1))
-        drawText(disabled ? "WAIT" : subtitle, at: CGPoint(x: center.x, y: center.y + 16), size: 8,
-                 color: UIColor.white.withAlphaComponent(disabled ? 0.3 : 0.72))
+        drawSymbol(named: disabled ? "pause.fill" : symbolName, at: center,
+                   size: pressed ? actionRadius * 0.78 : actionRadius * 0.86,
+                   color: color.withAlphaComponent(disabled ? 0.35 : 1))
+        drawButtonLabel(disabled ? "WAIT" : title,
+                        at: CGPoint(x: center.x, y: center.y + actionRadius + 11),
+                        color: disabled ? UIColor.white.withAlphaComponent(0.45) : color)
     }
 
     var passTitle: String {
         if holdingKeeper || takingThrowIn { return "SHORT THROW" }
         if takingPenalty { return "PASS" }
         if preparingHeader || canHead { return "HEAD PASS" }
-        if hasBall || canReceive || takingGoalKick { return "PASS" }
+        if hasBall || canReceive || takingGoalKick { return "SHORT PASS" }
         return "BLOCK"
     }
 
     var actionTitle: String {
         if actionTouch != nil && status == .cancelled { return "RELEASE" }
         if holdingKeeper || takingThrowIn { return "LONG THROW" }
-        if takingGoalKick { return "LONG BALL" }
+        if takingGoalKick { return "LONG PASS" }
         if takingPenalty { return "SHOOT" }
         if queuedHeader { return "HEADER" }
         if preparingHeader || canHead { return "HEAD" }
         if status == .sliding { return "SLIDE" }
-        if status == .queued { return "QUEUED" }
-        if status == .recovering { return "RECOVER" }
         if !hasBall && !canReceive { return "SLIDE" }
         switch scene?.simulation.shootingButtonIntent {
         case .shot: return "SHOOT"
         case .cross: return "CROSS"
-        default: return "LONG BALL"
+        default: return "LONG PASS"
+        }
+    }
+
+    var passIconName: String {
+        if waitingForAutomaticPlay || takingPenalty { return "pause.fill" }
+        if holdingKeeper || takingThrowIn { return "hand.raised.fill" }
+        if preparingHeader || canHead { return "arrow.right" }
+        if hasBall || canReceive || takingGoalKick { return "arrow.right" }
+        return "shield.fill"
+    }
+
+    var actionIconName: String {
+        if waitingForAutomaticPlay { return "pause.fill" }
+        if actionTouch != nil && status == .cancelled { return "hand.raised.fill" }
+        if holdingKeeper || takingThrowIn { return "hand.raised.fill" }
+        if takingGoalKick { return "arrow.up" }
+        if takingPenalty { return "scope" }
+        if queuedHeader || preparingHeader || canHead { return "person.crop.circle" }
+        if status == .sliding || (!hasBall && !canReceive) { return "figure.soccer" }
+        switch scene?.simulation.shootingButtonIntent {
+        case .shot: return "scope"
+        case .cross: return "arrow.up.right"
+        default: return "arrow.up"
         }
     }
 
@@ -485,5 +509,37 @@ final class InputController: UIView {
         let dimensions = (text as NSString).size(withAttributes: attributes)
         (text as NSString).draw(at: CGPoint(x: center.x - dimensions.width / 2,
                                           y: center.y - dimensions.height / 2), withAttributes: attributes)
+    }
+
+    private func drawSymbol(named name: String, at center: CGPoint, size: CGFloat, color: UIColor) {
+        let configuration = UIImage.SymbolConfiguration(pointSize: size, weight: .semibold, scale: .medium)
+        guard let image = UIImage(systemName: name, withConfiguration: configuration)?
+            .withTintColor(color, renderingMode: .alwaysOriginal) else {
+            drawText("●", at: center, size: size * 0.72, color: color)
+            return
+        }
+        let dimensions = image.size
+        image.draw(at: CGPoint(x: center.x - dimensions.width / 2,
+                               y: center.y - dimensions.height / 2))
+    }
+
+    private func drawButtonLabel(_ text: String, at center: CGPoint, color: UIColor) {
+        let baseFont = UIFont.systemFont(ofSize: text.count > 9 ? 9 : 10, weight: .heavy)
+        let font = baseFont.fontDescriptor.withDesign(.rounded).map { UIFont(descriptor: $0, size: baseFont.pointSize) }
+            ?? baseFont
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.85)
+        shadow.shadowBlurRadius = 3
+        shadow.shadowOffset = CGSize(width: 0, height: 1)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .kern: 0.8,
+            .shadow: shadow
+        ]
+        let dimensions = (text as NSString).size(withAttributes: attributes)
+        (text as NSString).draw(at: CGPoint(x: center.x - dimensions.width / 2,
+                                            y: center.y - dimensions.height / 2),
+                                withAttributes: attributes)
     }
 }
